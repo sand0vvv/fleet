@@ -220,7 +220,7 @@ async def cmd_agent_op(op, args, agent):
         await manager.push(machine, {"type": "restart", "agent": agent["name"]})
         await reply(agent["topic_id"], f"♻️ {agent['name']} перезапуск")
     elif op == "new":
-        db.update_agent(agent["name"], session_id=None)
+        db.update_agent(agent["name"], session_id="")  # "" = force fresh (not attach)
         await reply(agent["topic_id"], "🆕 новая сессия (resume сброшен)")
     else:  # stop | compact | usage
         await manager.push(machine, {"type": op, "agent": agent["name"],

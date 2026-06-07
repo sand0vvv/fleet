@@ -141,8 +141,10 @@ async def run_claude(project, prompt, model, session_id, name):
         base += ["--model", model]
     if session_id:
         attempts = [("resume", base + ["--resume", session_id])]
+    elif session_id == "":
+        attempts = [("fresh", base)]                       # /new -> force fresh
     else:
-        attempts = [("continue", base + ["--continue"]), ("fresh", base)]
+        attempts = [("continue", base + ["--continue"]), ("fresh", base)]  # never ran -> attach
 
     last = ""
     for label, args in attempts:
