@@ -19,6 +19,7 @@ import asyncio
 import pathlib
 import argparse
 import logging
+import subprocess
 import urllib.parse
 from logging.handlers import RotatingFileHandler
 
@@ -37,6 +38,7 @@ MACHINE = os.environ.get("MACHINE_NAME", "home")
 TOKEN = os.environ.get("RUNNER_TOKEN", "dev")
 
 _agent_locks = {}  # serialize claude runs per agent (one session at a time)
+_cli_procs = {}    # name -> Popen (cli-mode visible windows)
 
 # ── logging ──────────────────────────────────────────────────────────────────
 LOG_DIR = os.path.join(os.path.dirname(__file__), ".fleet", "logs")
@@ -102,16 +104,38 @@ async def download(url, dest_dir):
     return dest
 
 
-def _write_mcp_config(project, name):
-    """Write a per-agent .fleet-mcp.json wiring the channels MCP; return its path."""
-    server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "channels-mcp", "server.py"))
-    cfg = {"mcpServers": {"channels": {
-        "command": "python", "args": [server],
-        "env": {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name}}}}
+def _write_mcp_config(project, name, mode="headless"):
+    """Write a per-agent .fleet-mcp.json wiring the fleet MCP (server name 'fleet'); return path."""
+    server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
+    env = {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name}
+    if mode == "cli":
+        env["FLEET_MODE"] = "cli"
+        base_ws = BACKEND_WS.replace("/ws/runner", "")
+        env["FLEET_STREAM_WS"] = f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+    cfg = {"mcpServers": {"fleet": {"command": "node", "args": [server], "env": env}}}
     path = os.path.join(project, ".fleet-mcp.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f)
     return path
+
+
+def _spawn_cli(name, project, model):
+    """Launch a visible interactive claude window (cli mode) with channel injection."""
+    cfg = _write_mcp_config(project, name, mode="cli")
+    parts = ["claude", "--dangerously-load-development-channels", "server:fleet",
+             "--dangerously-skip-permissions", "--mcp-config", cfg]
+    if model:
+        parts += ["--model", model]
+    if os.name == "nt":
+        def _q(a):
+            return f'"{a}"' if " " in a else a
+        proc = subprocess.Popen(" ".join(_q(a) for a in parts), cwd=project, shell=True,
+                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+    else:
+        proc = subprocess.Popen(parts, cwd=project)
+    _cli_procs[name] = proc
+    log.info(f"cli spawned {name} pid={proc.pid}")
+    return proc.pid
 
 
 async def _exec(args, project, prompt):
@@ -178,12 +202,19 @@ async def handle(cmd):
     if t == "spawn":
         if project:
             pathlib.Path(os.path.join(project, ".inbox")).mkdir(parents=True, exist_ok=True)
-        await post(f"/agent/{name}/out", {"text": f"🟢 {name} на связи ({cmd.get('mode')})"})
+        if cmd.get("mode") == "cli":
+            try:
+                pid = _spawn_cli(name, project, cmd.get("model"))
+                await post(f"/agent/{name}/out", {"text": f"🟢 {name} (cli) — окно открыто, pid {pid}"})
+            except Exception as e:
+                log.error(f"cli spawn failed: {e}")
+                await post(f"/agent/{name}/out", {"text": f"cli spawn ошибка: {e}"})
+        else:
+            await post(f"/agent/{name}/out", {"text": f"🟢 {name} на связи (headless)"})
 
     elif t == "deliver":
         if cmd.get("mode") == "cli":
-            await post(f"/agent/{name}/out", {"text": f"⚠️ cli-режим ещё не готов, поставь /mode {name} headless"})
-            return
+            return  # cli messages delivered via backend stream to fleet-mcp, not here
         lock = _agent_locks.setdefault(name, asyncio.Lock())
         async with lock:
             note = ""
@@ -226,7 +257,19 @@ async def handle(cmd):
             f"(лимиты 5h/неделя через headless недоступны — это фактический расход)"})
 
     elif t in ("kill", "stop", "restart"):
-        log.info(f"{t} {name} (no-op for headless)")
+        p = _cli_procs.pop(name, None)
+        if p:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        if t == "restart" and cmd.get("mode") == "cli" and cmd.get("project_path"):
+            try:
+                pid = _spawn_cli(name, cmd["project_path"], cmd.get("model"))
+                await post(f"/agent/{name}/out", {"text": f"♻️ {name} (cli) перезапущен, pid {pid}"})
+            except Exception as e:
+                await post(f"/agent/{name}/out", {"text": f"restart ошибка: {e}"})
+        log.info(f"{t} {name}")
 
 
 async def heartbeat(ws):

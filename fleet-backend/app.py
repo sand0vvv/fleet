@@ -27,6 +27,22 @@ def log(*a):
     print("[fleet]", *a, file=sys.stderr, flush=True)
 
 
+# ── cli streams: fleet-mcp (cli mode) connects here; backend pushes msgs to inject ──
+_streams = {}  # agent_name -> WebSocket
+
+
+async def push_stream(name, payload) -> bool:
+    ws = _streams.get(name)
+    if not ws:
+        return False
+    try:
+        await ws.send_json(payload)
+        return True
+    except Exception:
+        _streams.pop(name, None)
+        return False
+
+
 # ── debounce: collect a burst of messages per agent, deliver as one ──────────
 DEBOUNCE_SECONDS = int(os.environ.get("DEBOUNCE_SECONDS", "15"))
 _pending = {}   # agent_name -> {"texts": [...], "files": [...]}
@@ -59,8 +75,14 @@ async def _flush_after(name):
         return
     text = "\n".join(t for t in buf["texts"] if t).strip()
     files = buf["files"]
+    if a["mode"] == "cli":
+        ok = await push_stream(name, {"type": "message", "text": text, "files": files})
+        log(f"flush(cli) -> agent={name} stream_ok={ok}")
+        if not ok:
+            await reply(a["topic_id"], f"⚠️ cli-агент не на связи (окно закрыто?). /restart {name}")
+        return
     machine = _machine_of(a)
-    log(f"flush -> agent={name} machine={machine} text_len={len(text)} files={len(files)}")
+    log(f"flush(headless) -> agent={name} machine={machine}")
     pushed = await manager.push(machine, {
         "type": "deliver", "agent": a["name"], "mode": a["mode"], "model": a["model"],
         "project_path": a["project_path"], "session_id": a["session_id"],
@@ -251,7 +273,9 @@ async def cmd_agent_op(op, args, agent):
         db.update_agent(agent["name"], status="dead")
         await reply(agent["topic_id"], f"🔴 {agent['name']} остановлен")
     elif op == "restart":
-        await manager.push(machine, {"type": "restart", "agent": agent["name"]})
+        await manager.push(machine, {"type": "restart", "agent": agent["name"],
+                                     "mode": agent["mode"], "project_path": agent["project_path"],
+                                     "model": agent["model"]})
         await reply(agent["topic_id"], f"♻️ {agent['name']} перезапуск")
     elif op == "new":
         db.update_agent(agent["name"], session_id="")  # "" = force fresh (not attach)
@@ -363,6 +387,20 @@ async def ws_runner(ws: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(machine)
         log(f"runner disconnected: {machine}")
+
+
+@app.websocket("/agent/{name}/stream")
+async def agent_stream(ws: WebSocket, name: str):
+    await ws.accept()
+    _streams[name] = ws
+    log(f"stream connected: {name}")
+    try:
+        while True:
+            await ws.receive_text()  # keepalive; content ignored
+    except WebSocketDisconnect:
+        if _streams.get(name) is ws:
+            _streams.pop(name, None)
+        log(f"stream disconnected: {name}")
 
 
 async def reply(thread_id, text):

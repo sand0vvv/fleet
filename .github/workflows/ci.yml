@@ -23,7 +23,9 @@ jobs:
         run: ruff check .
 
       - name: Compile all services
-        run: python -m py_compile fleet-backend/*.py receiver/*.py runner/*.py channels-mcp/*.py
+        run: |
+          python -m py_compile fleet-backend/*.py receiver/*.py runner/*.py
+          node --check fleet-mcp/index.mjs
 
       - name: Tests (pytest)
         run: pytest -q

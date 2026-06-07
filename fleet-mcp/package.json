@@ -1,0 +1,11 @@
+{
+  "name": "fleet-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "fleet-mcp": "index.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0"
+  }
+}
