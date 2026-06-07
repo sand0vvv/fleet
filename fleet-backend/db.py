@@ -86,6 +86,9 @@ def update_agent(name, **fields):
 
 
 def delete_agent(name):
+    a = get_agent(name)
+    if a:
+        q("DELETE FROM fleet.messages WHERE agent_id=%s", (a["id"],), fetch=None)
     q("DELETE FROM fleet.agents WHERE name=%s", (name,), fetch=None)
 
 

@@ -119,11 +119,61 @@ def _write_mcp_config(project, name, mode="headless"):
     return path
 
 
+def _register_project_mcp(project, name, mode):
+    """Merge the 'fleet' MCP into <project>/.mcp.json so Claude Code loads it
+    persistently (required for channels: `server:fleet`). Also auto-trust project MCP."""
+    server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
+    env = {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name}
+    if mode == "cli":
+        env["FLEET_MODE"] = "cli"
+        base_ws = BACKEND_WS.replace("/ws/runner", "")
+        env["FLEET_STREAM_WS"] = f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+    mcp_path = os.path.join(project, ".mcp.json")
+    data = {}
+    if os.path.exists(mcp_path):
+        try:
+            with open(mcp_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data.setdefault("mcpServers", {})["fleet"] = {"command": "node", "args": [server], "env": env}
+    with open(mcp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    # auto-approve project MCP servers (no trust prompt)
+    sdir = os.path.join(project, ".claude")
+    pathlib.Path(sdir).mkdir(parents=True, exist_ok=True)
+    spath = os.path.join(sdir, "settings.local.json")
+    sdata = {}
+    if os.path.exists(spath):
+        try:
+            with open(spath, encoding="utf-8") as f:
+                sdata = json.load(f)
+        except Exception:
+            sdata = {}
+    sdata["enableAllProjectMcpServers"] = True
+    with open(spath, "w", encoding="utf-8") as f:
+        json.dump(sdata, f, indent=2)
+
+
+def _unregister_project_mcp(project):
+    mcp_path = os.path.join(project, ".mcp.json")
+    if not os.path.exists(mcp_path):
+        return
+    try:
+        with open(mcp_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("mcpServers", {}).pop("fleet", None) is not None:
+            with open(mcp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
 def _spawn_cli(name, project, model):
     """Launch a visible interactive claude window (cli mode) with channel injection."""
-    cfg = _write_mcp_config(project, name, mode="cli")
+    _register_project_mcp(project, name, "cli")
     parts = ["claude", "--dangerously-load-development-channels", "server:fleet",
-             "--dangerously-skip-permissions", "--mcp-config", cfg]
+             "--dangerously-skip-permissions"]
     if model:
         parts += ["--model", model]
     if os.name == "nt":
@@ -267,6 +317,8 @@ async def handle(cmd):
                 p.terminate()
             except Exception:
                 pass
+        if t == "kill" and cmd.get("project_path"):
+            _unregister_project_mcp(cmd["project_path"])
         if t == "restart" and cmd.get("mode") == "cli" and cmd.get("project_path"):
             try:
                 pid = _spawn_cli(name, cmd["project_path"], cmd.get("model"))

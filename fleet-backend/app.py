@@ -269,9 +269,14 @@ async def cmd_agent_op(op, args, agent):
         return await reply(None, "нет такого агента")
     machine = _machine_of(agent)
     if op == "kill":
-        await manager.push(machine, {"type": "kill", "agent": agent["name"]})
-        db.update_agent(agent["name"], status="dead")
-        await reply(agent["topic_id"], f"🔴 {agent['name']} остановлен")
+        await manager.push(machine, {"type": "kill", "agent": agent["name"],
+                                     "project_path": agent["project_path"]})
+        try:
+            await tg.delete_forum_topic(SUPERGROUP, agent["topic_id"])
+        except Exception:
+            pass
+        db.delete_agent(agent["name"])
+        await reply(None, f"🔴 {agent['name']} удалён: процесс остановлен, топик и записи в БД снесены")
     elif op == "restart":
         await manager.push(machine, {"type": "restart", "agent": agent["name"],
                                      "mode": agent["mode"], "project_path": agent["project_path"],
