@@ -388,14 +388,29 @@ def doctor():
         print(f"claude         : FAIL {e}")
 
 
+def _kill_cli_procs():
+    for name, p in list(_cli_procs.items()):
+        try:
+            p.terminate()
+            log.info(f"terminated cli proc {name}")
+        except Exception:
+            pass
+    _cli_procs.clear()
+
+
 def main():
     p = argparse.ArgumentParser(prog="fleet-runner")
     p.add_argument("cmd", nargs="?", default="start", choices=["start", "doctor"])
     args = p.parse_args()
     if args.cmd == "doctor":
         doctor()
-    else:
+        return
+    try:
         asyncio.run(start())
+    except KeyboardInterrupt:
+        log.info("shutting down (Ctrl+C)")
+    finally:
+        _kill_cli_procs()  # close cli windows so their streams don't zombie
 
 
 if __name__ == "__main__":

@@ -397,6 +397,12 @@ async def ws_runner(ws: WebSocket):
 @app.websocket("/agent/{name}/stream")
 async def agent_stream(ws: WebSocket, name: str):
     await ws.accept()
+    old = _streams.get(name)
+    if old:
+        try:
+            await old.close()
+        except Exception:
+            pass
     _streams[name] = ws
     log(f"stream connected: {name}")
     try:

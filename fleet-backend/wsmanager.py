@@ -8,6 +8,12 @@ class WSManager:
 
     async def connect(self, machine_name, ws):
         await ws.accept()
+        old = self._conns.get(machine_name)
+        if old:
+            try:
+                await old.close()
+            except Exception:
+                pass
         self._conns[machine_name] = ws
         db.touch_machine(machine_name)
 
