@@ -93,7 +93,14 @@ def delete_agent(name):
 
 
 # ---- messages ----
-def log_message(agent_id, direction, text, mtype="text", files=None, voice_text=None, tg_message_id=None):
-    q("""INSERT INTO fleet.messages (agent_id, direction, text, type, files_path, voice_text, tg_message_id, status)
-         VALUES (%s,%s,%s,%s,%s,%s,%s,'ok')""",
-      (agent_id, direction, text, mtype, files, voice_text, tg_message_id), fetch=None)
+def log_message(agent_id, direction, text, mtype="text", files=None, voice_text=None,
+                tg_message_id=None, reply_to=None):
+    q("""INSERT INTO fleet.messages
+            (agent_id, direction, text, type, files_path, voice_text, tg_message_id, reply_to, status)
+         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'ok')""",
+      (agent_id, direction, text, mtype, files, voice_text, tg_message_id, reply_to), fetch=None)
+
+
+def get_message_by_tgid(tg_message_id):
+    return q("SELECT * FROM fleet.messages WHERE tg_message_id=%s ORDER BY id DESC LIMIT 1",
+             (tg_message_id,), fetch="one")

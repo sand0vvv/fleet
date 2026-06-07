@@ -169,13 +169,21 @@ async def tg_update(req: Request):
 
     text = util.forward_prefix(msg) + text  # tag forwarded messages
 
+    # reply linkage: if owner replies to a specific message, tag it for the agent
+    reply_to_id = None
+    rt = msg.get("reply_to_message")
+    if rt and not rt.get("forum_topic_created") and rt.get("message_id") != thread_id:
+        reply_to_id = rt.get("message_id")
+        quoted = (rt.get("text") or rt.get("caption") or "")[:200]
+        text = f'[↩ ответ на #{reply_to_id}: "{quoted}"]\n' + text
+
     agent = db.get_agent_by_topic(thread_id) if thread_id else None
 
     # log inbound to DB (always; agent_id null for General)
     try:
         db.log_message(agent["id"] if agent else None, "in", text, mtype,
                        files or None, voice_text=(text if mtype == "voice" else None),
-                       tg_message_id=msg.get("message_id"))
+                       tg_message_id=msg.get("message_id"), reply_to=reply_to_id)
         log("inbound logged to db")
     except Exception as e:
         log(f"log_message FAILED: {e}")
