@@ -93,7 +93,7 @@ def _record_stats(name, data):
 async def post(path, payload):
     try:
         async with httpx.AsyncClient(timeout=300) as c:
-            await c.post(f"{BACKEND_HTTP}{path}", json=payload)
+            await c.post(f"{BACKEND_HTTP}{path}", json=payload, headers={"X-Fleet-Token": TOKEN})
     except Exception as e:
         log.error(f"POST {path} failed: {e}")
 
@@ -114,11 +114,12 @@ async def download(url, dest_dir):
 def _write_mcp_config(project, name, mode="headless"):
     """Write a per-agent .fleet-mcp.json wiring the fleet MCP (server name 'fleet'); return path."""
     server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
-    env = {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name}
+    env = {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name, "FLEET_TOKEN": TOKEN}
     if mode == "cli":
         env["FLEET_MODE"] = "cli"
         base_ws = BACKEND_WS.replace("/ws/runner", "")
-        env["FLEET_STREAM_WS"] = f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+        env["FLEET_STREAM_WS"] = (f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+                                  f"?token={urllib.parse.quote(TOKEN)}")
     cfg = {"mcpServers": {"fleet": {"command": "node", "args": [server], "env": env}}}
     path = os.path.join(project, ".fleet-mcp.json")
     with open(path, "w", encoding="utf-8") as f:
@@ -130,11 +131,12 @@ def _register_project_mcp(project, name, mode):
     """Merge the 'fleet' MCP into <project>/.mcp.json so Claude Code loads it
     persistently (required for channels: `server:fleet`). Also auto-trust project MCP."""
     server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
-    env = {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name}
+    env = {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name, "FLEET_TOKEN": TOKEN}
     if mode == "cli":
         env["FLEET_MODE"] = "cli"
         base_ws = BACKEND_WS.replace("/ws/runner", "")
-        env["FLEET_STREAM_WS"] = f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+        env["FLEET_STREAM_WS"] = (f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+                                  f"?token={urllib.parse.quote(TOKEN)}")
     mcp_path = os.path.join(project, ".mcp.json")
     data = {}
     if os.path.exists(mcp_path):

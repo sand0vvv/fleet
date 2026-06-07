@@ -19,6 +19,7 @@ const BACKEND = (process.env.FLEET_BACKEND_HTTP || "").replace(/\/$/, "");
 const AGENT = process.env.FLEET_AGENT_NAME || "";
 const MODE = process.env.FLEET_MODE || "headless";
 const STREAM_WS = process.env.FLEET_STREAM_WS || "";
+const TOKEN = process.env.FLEET_TOKEN || "";
 
 const LOGDIR = join(process.cwd(), ".fleet");
 try { mkdirSync(LOGDIR, { recursive: true }); } catch { /* ignore */ }
@@ -62,7 +63,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     if (name === "send_message") {
       await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/out`, {
-        method: "POST", headers: { "content-type": "application/json" },
+        method: "POST", headers: { "content-type": "application/json", "x-fleet-token": TOKEN },
         body: JSON.stringify({ text: args.text }),
       });
       flog("send_message ok");
@@ -73,7 +74,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const fd = new FormData();
       fd.append("file", new Blob([buf]), basename(args.path));
       fd.append("caption", args.caption || "");
-      await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/file`, { method: "POST", body: fd });
+      await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/file`,
+        { method: "POST", headers: { "x-fleet-token": TOKEN }, body: fd });
       flog("send_file ok", args.path);
       return { content: [{ type: "text", text: "sent" }] };
     }

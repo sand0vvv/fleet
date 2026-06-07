@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 app = FastAPI(title="fleet-receiver")
 BACKEND = os.environ.get("FLEET_BACKEND_URL", "").rstrip("/")
 SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+FLEET_TOKEN = os.environ.get("FLEET_TOKEN", "")
 
 
 @app.get("/health")
@@ -25,7 +26,7 @@ async def webhook(req: Request):
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             await c.post(f"{BACKEND}/tg/update", content=body,
-                         headers={"content-type": "application/json"})
+                         headers={"content-type": "application/json", "x-fleet-token": FLEET_TOKEN})
     except Exception as e:
         print(f"[receiver] forward failed: {e}")
     return {"ok": True}

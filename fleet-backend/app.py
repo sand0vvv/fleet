@@ -9,8 +9,10 @@ Runners connect via WS /ws/runner?machine=&token=.
 """
 import os
 import sys
+import hmac
 import asyncio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 
 import db
 import telegram as tg
@@ -25,6 +27,22 @@ SUPERGROUP = config.SUPERGROUP_CHAT_ID or None
 
 def log(*a):
     print("[fleet]", *a, file=sys.stderr, flush=True)
+
+
+def _ok_token(tok):
+    if not config.RUNNER_SECRET:
+        return True  # auth disabled until secret is set
+    return bool(tok) and hmac.compare_digest(tok, config.RUNNER_SECRET)
+
+
+@app.middleware("http")
+async def auth_mw(request: Request, call_next):
+    if config.RUNNER_SECRET:
+        path = request.url.path
+        protected = path.startswith("/agent/") or path in ("/usage_report", "/coordinate_result", "/tg/update")
+        if protected and not _ok_token(request.headers.get("x-fleet-token")):
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
+    return await call_next(request)
 
 
 # ── cli streams: fleet-mcp (cli mode) connects here; backend pushes msgs to inject ──
@@ -461,6 +479,10 @@ async def ws_runner(ws: WebSocket):
     if not machine or not token:
         await ws.close(code=4001)
         return
+    if not _ok_token(token):
+        log(f"runner auth rejected: {machine}")
+        await ws.close(code=4003)
+        return
     db.upsert_machine(machine, token_hash=token)
     await manager.connect(machine, ws)
     log(f"runner connected: {machine}")
@@ -476,6 +498,9 @@ async def ws_runner(ws: WebSocket):
 
 @app.websocket("/agent/{name}/stream")
 async def agent_stream(ws: WebSocket, name: str):
+    if not _ok_token(ws.query_params.get("token")):
+        await ws.close(code=4003)
+        return
     await ws.accept()
     old = _streams.get(name)
     if old:

@@ -57,5 +57,12 @@ Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Rail
 
 Runner — это CLI-приложение: автoreconnect WS, watchdog (ловит упавшие cli-окна → пишет в топик `/restart`), ротация логов, чистка cli-окон при Ctrl+C.
 
+## Безопасность
+- TG: бот реагирует только на `OWNER_TG_ID`.
+- **Shared-secret auth** (включается когда задан): один и тот же секрет в трёх местах —
+  `RUNNER_SECRET` (fleet-backend) = `FLEET_TOKEN` (receiver) = `RUNNER_TOKEN` (runner).
+  Проверяется на WS (runner + cli-стрим) и на всех POST (`X-Fleet-Token`). Пустой везде = auth выключен (dev).
+- Спавн агентов = RCE-поверхность → только owner, машины по секрету.
+
 ## CI / релизы
 GitHub Actions (ruff + pytest + py_compile + node --check) на каждый push. Релизы — по фичам (`v0.x.0`).
