@@ -136,7 +136,7 @@ async def tg_update(req: Request):
 # ─────────────────────────────────────────────────────────────────────────────
 async def handle_command(text, agent=None):
     parts = text.strip().split()
-    cmd = parts[0].lstrip("/").lower()
+    cmd = parts[0].lstrip("/").split("@")[0].lower()  # strip @botusername in groups
     args = parts[1:]
     if cmd == "help":
         await reply(None, _help_text())
