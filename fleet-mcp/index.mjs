@@ -36,7 +36,16 @@ const INSTRUCTIONS =
 
 const server = new Server(
   { name: "fleet", version: "0.1.0" },
-  { capabilities: { tools: {} }, instructions: INSTRUCTIONS }
+  {
+    capabilities: {
+      tools: {},
+      logging: {},
+      // Claude Code Channels — REQUIRED so claude treats this server as a channel
+      // provider and accepts notifications/claude/channel into the live session.
+      experimental: { "claude/channel": {}, "claude/channel/permission": {} },
+    },
+    instructions: INSTRUCTIONS,
+  }
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
