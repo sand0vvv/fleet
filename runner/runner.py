@@ -129,8 +129,12 @@ def _spawn_cli(name, project, model):
     if os.name == "nt":
         def _q(a):
             return f'"{a}"' if " " in a else a
-        proc = subprocess.Popen(" ".join(_q(a) for a in parts), cwd=project, shell=True,
-                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+        claude_cmd = " ".join(_q(a) for a in parts)
+        # cmd /k -> the new console window STAYS open (so errors are visible);
+        # CREATE_NEW_CONSOLE -> its own window.
+        full = f'cmd /k {claude_cmd}'
+        log.info(f"cli launch: {full}")
+        proc = subprocess.Popen(full, cwd=project, creationflags=subprocess.CREATE_NEW_CONSOLE)
     else:
         proc = subprocess.Popen(parts, cwd=project)
     _cli_procs[name] = proc
