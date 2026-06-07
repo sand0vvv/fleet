@@ -314,6 +314,33 @@ def _usage_panel():
         return f"usage ошибка: {e}"
 
 
+async def _coordinate(text, agents, machines):
+    """NL -> one slash command, via a cheap headless claude (coordinator)."""
+    spec = (
+        "Ты — координатор флота агентов. Преобразуй запрос владельца в ОДНУ команду.\n"
+        "Команды:\n"
+        "/spawn <machine> <path> [headless|cli] [model]\n"
+        "/list  /machines  /status <a>  /kill <a>  /restart <a>  /mode <a> <headless|cli>\n"
+        "/model <a> <m>  /rename <a> <title>  /sessions <a>  /use <a> <id>  /new <a>  /stop <a>  /compact <a>\n"
+        f"Машины: {', '.join(machines) or '—'}\n"
+        f"Агенты: {json.dumps(agents, ensure_ascii=False)}\n"
+        f"Запрос владельца: {text}\n"
+        "Ответь ТОЛЬКО одной строкой-командой (начинается с /). "
+        "Если неясно или не хватает данных (напр. пути) — ответь NONE."
+    )
+    args = ["-p", "--output-format", "json", "--dangerously-skip-permissions", "--model", "haiku"]
+    raw, _rc, _err = await _exec(args, os.path.expanduser("~"), spec)
+    try:
+        res = (json.loads(raw).get("result") or "").strip()
+    except Exception:
+        res = raw.strip()
+    for line in res.splitlines():
+        line = line.strip().strip("`").strip()
+        if line.startswith("/"):
+            return line
+    return "NONE"
+
+
 async def handle(cmd):
     t = cmd.get("type")
     name = cmd.get("agent")
@@ -385,6 +412,10 @@ async def handle(cmd):
         alive = p is not None and p.poll() is None
         txt = f"runner: cli-процесс {'жив, pid ' + str(p.pid) if alive else 'не запущен'}"
         await post(f"/agent/{name}/out", {"text": txt})
+
+    elif t == "coordinate":
+        cmdline = await _coordinate(cmd.get("text", ""), cmd.get("agents", []), cmd.get("machines", []))
+        await post("/coordinate_result", {"command": cmdline})
 
     elif t in ("kill", "stop", "restart"):
         p = _cli_procs.pop(name, None)

@@ -42,6 +42,8 @@ Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Rail
 - `/new <a>` · `/stop <a>` · `/compact <a>` · `/help`
 - `/usage` (только в General) — реальная панель лимитов Claude (сессия 5ч / неделя / неделя Sonnet) через `/api/oauth/usage` (токен из `~/.claude/.credentials.json` на runner-машине)
 
+**Координатор:** в General можно писать **свободным текстом** (без `/`) — координатор (claude haiku на runner'е) переведёт запрос в команду и выполнит её. Слэш-команды работают всегда.
+
 ## Структура репо
 `receiver/` · `fleet-backend/` · `runner/` · `fleet-mcp/` · `migrations/`
 

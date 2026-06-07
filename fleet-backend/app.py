@@ -167,8 +167,9 @@ async def tg_update(req: Request):
         if text.startswith("/"):
             log(f"command(General): {text}")
             await handle_command(text)
-        else:
-            await reply(None, "В General — командой (/help) или из топика агента.")
+        elif text.strip():
+            log(f"coordinate(General): {text[:80]}")
+            await cmd_coordinate(text)
         return {"ok": True}
 
     if not agent:
@@ -269,6 +270,17 @@ async def cmd_status(args):
                                f"session={a['session_id'] or '—'}")
     machine = _machine_of(a)
     await manager.push(machine, {"type": "status", "agent": a["name"]})
+
+
+async def cmd_coordinate(text):
+    machines = manager.machines()
+    if not machines:
+        return await reply(None, "нет онлайн-машин (runner не на связи) — координатор недоступен")
+    agents = db.list_agents() or []
+    ag = [{"name": a["name"], "machine": a.get("machine_name"), "mode": a["mode"],
+           "path": a["project_path"]} for a in agents]
+    mc = [m["name"] for m in (db.list_machines() or [])]
+    await manager.push(machines[0], {"type": "coordinate", "text": text, "agents": ag, "machines": mc})
 
 
 async def cmd_usage_all():
@@ -417,6 +429,18 @@ async def agent_file(name: str, file: UploadFile = File(...), caption: str = For
 async def usage_report(req: Request):
     body = await req.json()
     await reply(None, body.get("text", ""))
+    return {"ok": True}
+
+
+@app.post("/coordinate_result")
+async def coordinate_result(req: Request):
+    body = await req.json()
+    cmdline = (body.get("command") or "").strip()
+    if cmdline.startswith("/"):
+        await reply(None, f"→ {cmdline}")
+        await handle_command(cmdline)
+    else:
+        await reply(None, "не понял запрос — уточни или используй команды (/help)")
     return {"ok": True}
 
 
