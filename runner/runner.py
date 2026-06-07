@@ -13,12 +13,14 @@ Env (.env next to this file or process env):
   FLEET_BACKEND_HTTP, FLEET_BACKEND_WS, MACHINE_NAME, RUNNER_TOKEN
 """
 import os
+import re
 import sys
 import json
 import asyncio
 import pathlib
 import argparse
 import logging
+import datetime
 import subprocess
 import urllib.parse
 from logging.handlers import RotatingFileHandler
@@ -36,6 +38,8 @@ BACKEND_HTTP = os.environ.get("FLEET_BACKEND_HTTP", "").rstrip("/")
 BACKEND_WS = os.environ.get("FLEET_BACKEND_WS", "").rstrip("/")
 MACHINE = os.environ.get("MACHINE_NAME", "home")
 TOKEN = os.environ.get("RUNNER_TOKEN", "dev")
+# "channels" = approved path (no prompt); "dev" = --dangerously-load-development-channels (prompts)
+CHANNEL_MODE = os.environ.get("FLEET_CHANNEL_MODE", "channels")
 
 _agent_locks = {}  # serialize claude runs per agent (one session at a time)
 _cli_procs = {}    # name -> Popen (cli-mode visible windows)
@@ -172,8 +176,11 @@ def _unregister_project_mcp(project):
 def _spawn_cli(name, project, model):
     """Launch a visible interactive claude window (cli mode) with channel injection."""
     _register_project_mcp(project, name, "cli")
-    parts = ["claude", "--dangerously-load-development-channels", "server:fleet",
-             "--dangerously-skip-permissions"]
+    if CHANNEL_MODE == "dev":
+        chan = ["--dangerously-load-development-channels", "server:fleet"]
+    else:
+        chan = ["--channels", "server:fleet"]  # approved path, no confirm prompt
+    parts = ["claude", *chan, "--dangerously-skip-permissions"]
     if model:
         parts += ["--model", model]
     if os.name == "nt":
@@ -247,6 +254,21 @@ async def run_claude(project, prompt, model, session_id, name):
     return last or "(пустой ответ)", session_id
 
 
+def _list_sessions(project):
+    """List Claude Code sessions stored for this project dir (newest first)."""
+    enc = re.sub(r"[:\\/]", "-", project or "")
+    d = os.path.join(os.path.expanduser("~"), ".claude", "projects", enc)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for f in os.listdir(d):
+        if f.endswith(".jsonl"):
+            p = os.path.join(d, f)
+            out.append((f[:-6], os.path.getmtime(p)))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return [(sid, datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")) for sid, ts in out]
+
+
 async def handle(cmd):
     t = cmd.get("type")
     name = cmd.get("agent")
@@ -301,14 +323,31 @@ async def handle(cmd):
         await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
         await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
 
-    elif t == "usage":
+    elif t == "usage_all":
         s = _load_stats()
-        a = s["agents"].get(name, {"cost": 0.0, "in": 0, "out": 0, "runs": 0})
-        total = sum(x.get("cost", 0) for x in s["agents"].values())
-        await post(f"/agent/{name}/out", {"text":
-            f"📊 {name}\nрасход: ${a['cost']:.4f} · токены in/out: {a['in']}/{a['out']} · "
-            f"запусков: {a['runs']}\nвсего по флоту: ${total:.4f}\n"
-            f"(лимиты 5h/неделя через headless недоступны — это фактический расход)"})
+        if not s["agents"]:
+            await post("/usage_report", {"text": "📊 расход пока нулевой (трекинг с момента запуска)"})
+        else:
+            lines = [f"• {n}: ${a['cost']:.4f} · {a['in']}/{a['out']} tok · {a['runs']} зап."
+                     for n, a in s["agents"].items()]
+            total = sum(a["cost"] for a in s["agents"].values())
+            await post("/usage_report", {"text": "📊 Расход флота (фактический):\n" + "\n".join(lines)
+                                         + f"\nИТОГО: ${total:.4f}\n(реальная панель 5h/неделя — отдельным шагом)"})
+
+    elif t == "list_sessions":
+        sessions = _list_sessions(project)
+        if not sessions:
+            await post(f"/agent/{name}/out", {"text": "сессий в этой папке не найдено"})
+        else:
+            lines = [f"{i + 1}. {sid}  ({ts})" for i, (sid, ts) in enumerate(sessions[:15])]
+            await post(f"/agent/{name}/out", {"text": "Сессии папки (новые сверху):\n" + "\n".join(lines)
+                                              + "\n\nвыбрать: /use <agent> <id>"})
+
+    elif t == "status":
+        p = _cli_procs.get(name)
+        alive = p is not None and p.poll() is None
+        txt = f"runner: cli-процесс {'жив, pid ' + str(p.pid) if alive else 'не запущен'}"
+        await post(f"/agent/{name}/out", {"text": txt})
 
     elif t in ("kill", "stop", "restart"):
         p = _cli_procs.pop(name, None)
@@ -358,7 +397,11 @@ async def start():
     if not BACKEND_WS or not BACKEND_HTTP:
         log.error("set FLEET_BACKEND_HTTP and FLEET_BACKEND_WS in .env")
         sys.exit(1)
-    log.info(f"runner starting (machine={MACHINE}, logs={LOG_DIR})")
+    log.info("=" * 56)
+    log.info(f"  FLEET RUNNER · machine={MACHINE} · channels={CHANNEL_MODE}")
+    log.info(f"  backend : {BACKEND_HTTP}")
+    log.info(f"  logs    : {os.path.join(LOG_DIR, 'runner.log')}")
+    log.info("=" * 56)
     while True:
         try:
             await serve_once()

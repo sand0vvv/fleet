@@ -202,8 +202,17 @@ async def handle_command(text, agent=None):
         await cmd_machines()
     elif cmd == "status":
         await cmd_status(args)
-    elif cmd in ("kill", "restart", "new", "stop", "compact", "usage"):
+    elif cmd in ("kill", "restart", "new", "stop", "compact"):
         await cmd_agent_op(cmd, args, agent)
+    elif cmd == "usage":
+        if agent is not None:
+            await reply(agent["topic_id"], "/usage работает только в General")
+        else:
+            await cmd_usage_all()
+    elif cmd == "sessions":
+        await cmd_sessions(args, agent)
+    elif cmd == "use":
+        await cmd_use(args, agent)
     elif cmd == "mode":
         await cmd_set(args, "mode")
     elif cmd == "model":
@@ -258,6 +267,45 @@ async def cmd_status(args):
         return await reply(None, "нет такого агента")
     await reply(a["topic_id"], f"{a['name']}: {a['status']} · {a['mode']} · {a['model'] or 'default'} · "
                                f"session={a['session_id'] or '—'}")
+    machine = _machine_of(a)
+    await manager.push(machine, {"type": "status", "agent": a["name"]})
+
+
+async def cmd_usage_all():
+    sent = 0
+    for m in manager.machines():
+        if await manager.push(m, {"type": "usage_all"}):
+            sent += 1
+    if not sent:
+        await reply(None, "нет онлайн-машин (runner не на связи)")
+
+
+async def cmd_sessions(args, agent):
+    if agent is None:
+        if not args:
+            return await reply(None, "usage: /sessions <agent>")
+        agent = db.get_agent(args[0])
+    if not agent:
+        return await reply(None, "нет такого агента")
+    machine = _machine_of(agent)
+    await manager.push(machine, {"type": "list_sessions", "agent": agent["name"],
+                                 "project_path": agent["project_path"]})
+
+
+async def cmd_use(args, agent):
+    if agent is not None:
+        if not args:
+            return await reply(agent["topic_id"], "usage: /use <session_id>")
+        sid = args[0]
+    else:
+        if len(args) < 2:
+            return await reply(None, "usage: /use <agent> <session_id>")
+        agent = db.get_agent(args[0])
+        sid = args[1]
+    if not agent:
+        return await reply(None, "нет такого агента")
+    db.update_agent(agent["name"], session_id=sid)
+    await reply(agent["topic_id"], f"сессия установлена: {sid}\n(headless подхватит сразу; cli — сделай /restart)")
 
 
 async def cmd_agent_op(op, args, agent):
@@ -319,7 +367,8 @@ async def cmd_rename(args, agent):
 
 def _help_text():
     return ("Команды:\n/spawn <machine> <path> [headless|cli] [model]\n/list · /machines · /status <a>\n"
-            "/kill <a> · /restart <a> · /mode <a> <m> · /model <a> <m>\n/new · /stop · /compact · /usage")
+            "/kill <a> · /restart <a> · /mode <a> <m> · /model <a> <m> · /rename <a> <title>\n"
+            "/sessions <a> · /use <a> <id> · /new · /stop · /compact\n/usage (только в General)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -361,6 +410,13 @@ async def agent_file(name: str, file: UploadFile = File(...), caption: str = For
         os.remove(tmp)
     except OSError:
         pass
+    return {"ok": True}
+
+
+@app.post("/usage_report")
+async def usage_report(req: Request):
+    body = await req.json()
+    await reply(None, body.get("text", ""))
     return {"ok": True}
 
 

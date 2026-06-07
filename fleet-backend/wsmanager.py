@@ -24,6 +24,9 @@ class WSManager:
     def is_online(self, machine_name):
         return machine_name in self._conns
 
+    def machines(self):
+        return list(self._conns.keys())
+
     async def push(self, machine_name, payload: dict) -> bool:
         """Push a command down to a machine's runner. Returns False if offline."""
         ws = self._conns.get(machine_name)
