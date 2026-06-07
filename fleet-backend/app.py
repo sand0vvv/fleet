@@ -1,14 +1,13 @@
 """fleet-backend — routing brain.
 
-Flow:
-  Telegram --webhook--> receiver --POST /tg/update--> here
-    -> auth (OWNER_TG_ID), transcribe voice, route:
-         General topic  -> command / coordinator
-         agent topic    -> push 'deliver' to that agent's runner (WS)
-  Agent reply: runner --POST /agent/{name}/out--> here -> sendMessage to topic
-  Runners connect via WS /ws/runner?machine=&token= (push channel down).
+Telegram --webhook--> receiver --POST /tg/update--> here
+  -> auth (OWNER_TG_ID), transcribe voice, log inbound, route:
+       General topic -> command
+       agent topic   -> push 'deliver' to that agent's runner (WS)
+Agent reply: runner --POST /agent/{name}/out--> here -> sendMessage to topic.
+Runners connect via WS /ws/runner?machine=&token=.
 """
-import os
+import sys
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 
 import db
@@ -18,14 +17,23 @@ from wsmanager import manager
 import config
 
 app = FastAPI(title="fleet-backend")
-
-# Supergroup chat id (learned from first owner update if not set in env).
 SUPERGROUP = config.SUPERGROUP_CHAT_ID or None
+
+
+def log(*a):
+    print("[fleet]", *a, file=sys.stderr, flush=True)
 
 
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+def _machine_of(agent):
+    if not agent or not agent.get("machine_id"):
+        return None
+    m = db.q("SELECT name FROM fleet.machines WHERE id=%s", (agent["machine_id"],), fetch="one")
+    return m["name"] if m else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,54 +48,72 @@ async def tg_update(req: Request):
         return {"ok": True}
 
     frm = (msg.get("from") or {}).get("id")
-    if config.OWNER_TG_ID and frm != config.OWNER_TG_ID:
-        return {"ok": True}  # not the owner — ignore
-
     chat = msg.get("chat") or {}
+    thread_id = msg.get("message_thread_id")
+    log(f"update from={frm} chat={chat.get('id')} thread={thread_id} keys={[k for k in msg if k not in ('from','chat')]}")
+
+    if config.OWNER_TG_ID and frm != config.OWNER_TG_ID:
+        log(f"ignored non-owner {frm}")
+        return {"ok": True}
+
     if chat.get("type") in ("supergroup", "group") and SUPERGROUP is None:
         SUPERGROUP = chat.get("id")
+        log(f"learned supergroup chat_id={SUPERGROUP}")
 
-    thread_id = msg.get("message_thread_id")  # None in General topic
     text = msg.get("text") or msg.get("caption") or ""
-    files = []          # local file-URLs for runner to fetch
+    files = []
     mtype = "text"
 
-    # voice -> transcribe
     if msg.get("voice"):
-        url = await tg.get_file_url(msg["voice"]["file_id"])
-        text = await transcribe.transcribe_url(url) if url else ""
         mtype = "voice"
-    # photo / document -> pass file-URL to runner
+        url = await tg.get_file_url(msg["voice"]["file_id"])
+        log(f"voice file_url={'ok' if url else 'NONE'}")
+        text = await transcribe.transcribe_url(url) if url else ""
+        log(f"transcribed: {text[:120]!r}")
     elif msg.get("photo"):
+        mtype = "photo"
         url = await tg.get_file_url(msg["photo"][-1]["file_id"])
         if url:
             files.append(url)
-        mtype = "photo"
     elif msg.get("document"):
+        mtype = "doc"
         url = await tg.get_file_url(msg["document"]["file_id"])
         if url:
             files.append(url)
-        mtype = "doc"
 
-    # General topic -> commands / coordinator
+    agent = db.get_agent_by_topic(thread_id) if thread_id else None
+
+    # log inbound to DB (always; agent_id null for General)
+    try:
+        db.log_message(agent["id"] if agent else None, "in", text, mtype,
+                       files or None, voice_text=(text if mtype == "voice" else None),
+                       tg_message_id=msg.get("message_id"))
+        log("inbound logged to db")
+    except Exception as e:
+        log(f"log_message FAILED: {e}")
+
+    # General -> commands
     if not thread_id:
         if text.startswith("/"):
+            log(f"command(General): {text}")
             await handle_command(text)
         else:
             await reply(None, "В General — командой (/help) или из топика агента.")
         return {"ok": True}
 
-    # Agent topic -> route to that agent
-    agent = db.get_agent_by_topic(thread_id)
     if not agent:
+        log(f"no agent bound to topic {thread_id}")
         return {"ok": True}
 
     if text.startswith("/"):
+        log(f"command(topic {agent['name']}): {text}")
         await handle_command(text, agent=agent)
         return {"ok": True}
 
-    db.log_message(agent["id"], "in", text, mtype, files or None)
-    pushed = await manager.push(agent["machine_name"] if "machine_name" in agent else _machine_of(agent), {
+    machine = _machine_of(agent)
+    online = manager.is_online(machine) if machine else False
+    log(f"route -> agent={agent['name']} machine={machine} online={online} mode={agent['mode']}")
+    pushed = await manager.push(machine, {
         "type": "deliver",
         "agent": agent["name"],
         "mode": agent["mode"],
@@ -98,13 +124,9 @@ async def tg_update(req: Request):
         "files": files,
     })
     if not pushed:
-        await reply(thread_id, f"⚠️ машина агента оффлайн — runner не на связи")
+        log("push FAILED — runner offline")
+        await reply(thread_id, "⚠️ машина агента оффлайн — runner не на связи")
     return {"ok": True}
-
-
-def _machine_of(agent):
-    m = db.q("SELECT name FROM fleet.machines WHERE id=%s", (agent["machine_id"],), fetch="one")
-    return m["name"] if m else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +136,6 @@ async def handle_command(text, agent=None):
     parts = text.strip().split()
     cmd = parts[0].lstrip("/").lower()
     args = parts[1:]
-
     if cmd == "help":
         await reply(None, _help_text())
     elif cmd == "spawn":
@@ -141,16 +162,18 @@ async def cmd_spawn(args):
     machine, path = args[0], args[1]
     mode = args[2] if len(args) > 2 else "headless"
     model = args[3] if len(args) > 3 else None
-    if not db.get_machine(machine):
-        return await reply(None, f"машина '{machine}' не зарегистрирована (runner не подключался)")
-    name = os.path.basename(path.rstrip("/\\")) or machine
-    if not SUPERGROUP:
-        return await reply(None, "не знаю chat_id супергруппы — напиши что-нибудь в группе сначала")
-    topic_id = await tg.create_forum_topic(SUPERGROUP, name)
     m = db.get_machine(machine)
+    if not m:
+        return await reply(None, f"машина '{machine}' не зарегистрирована (runner не подключался)")
+    import os as _os
+    name = _os.path.basename(path.rstrip("/\\")) or machine
+    if not SUPERGROUP:
+        return await reply(None, "не знаю chat_id супергруппы — напиши что-нибудь в группе")
+    topic_id = await tg.create_forum_topic(SUPERGROUP, name)
     db.create_agent(name, m["id"], path, mode, model, topic_id)
     await manager.push(machine, {"type": "spawn", "agent": name, "mode": mode,
                                  "model": model, "project_path": path})
+    log(f"spawned {name} on {machine} topic={topic_id}")
     await reply(topic_id, f"🟢 {name} ({mode}) поднят на {machine}")
 
 
@@ -158,9 +181,9 @@ async def cmd_list():
     rows = db.list_agents() or []
     if not rows:
         return await reply(None, "агентов нет")
-    lines = [f"• {r['name']} — {r['machine_name'] or '?'} · {r['mode']} · {r['model'] or 'default'} · {r['status']}"
-             for r in rows]
-    await reply(None, "Агенты:\n" + "\n".join(lines))
+    await reply(None, "Агенты:\n" + "\n".join(
+        f"• {r['name']} — {r['machine_name'] or '?'} · {r['mode']} · {r['model'] or 'default'} · {r['status']}"
+        for r in rows))
 
 
 async def cmd_machines():
@@ -183,7 +206,7 @@ async def cmd_status(args):
 async def cmd_agent_op(op, args, agent):
     if agent is None:
         if not args:
-            return await reply(None, f"usage: /{op} <agent> (или из топика агента)")
+            return await reply(None, f"usage: /{op} <agent>")
         agent = db.get_agent(args[0])
     if not agent:
         return await reply(None, "нет такого агента")
@@ -198,7 +221,7 @@ async def cmd_agent_op(op, args, agent):
     elif op == "new":
         db.update_agent(agent["name"], session_id=None)
         await reply(agent["topic_id"], "🆕 новая сессия (resume сброшен)")
-    else:  # stop | compact | usage
+    else:
         await manager.push(machine, {"type": op, "agent": agent["name"]})
 
 
@@ -225,9 +248,11 @@ async def agent_out(name: str, req: Request):
     body = await req.json()
     a = db.get_agent(name)
     if not a or not SUPERGROUP:
+        log(f"agent_out: no agent '{name}' or no supergroup")
         return {"ok": False}
     text = body.get("text", "")
     files = body.get("files") or []
+    log(f"agent_out {name}: text={text[:80]!r} files={len(files)}")
     if text:
         r = await tg.send_message(SUPERGROUP, text, message_thread_id=a["topic_id"])
         tgid = (r.get("result") or {}).get("message_id") if r else None
@@ -235,7 +260,7 @@ async def agent_out(name: str, req: Request):
     for fp in files:
         is_img = fp.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
         send = tg.send_photo if is_img else tg.send_document
-        await send(SUPERGROUP, fp, caption=text if not text else None, message_thread_id=a["topic_id"])
+        await send(SUPERGROUP, fp, caption=None, message_thread_id=a["topic_id"])
     return {"ok": True}
 
 
@@ -247,7 +272,7 @@ async def agent_session(name: str, req: Request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Runner WebSocket (push channel down) + heartbeat
+# Runner WebSocket
 # ─────────────────────────────────────────────────────────────────────────────
 @app.websocket("/ws/runner")
 async def ws_runner(ws: WebSocket):
@@ -256,19 +281,23 @@ async def ws_runner(ws: WebSocket):
     if not machine or not token:
         await ws.close(code=4001)
         return
-    # NOTE: token check is a placeholder — compare hash in fleet.machines (TODO).
     db.upsert_machine(machine, token_hash=token)
     await manager.connect(machine, ws)
+    log(f"runner connected: {machine}")
     try:
         while True:
-            data = await ws.receive_json()  # heartbeats / acks up
+            data = await ws.receive_json()
             if data.get("type") == "heartbeat":
                 db.touch_machine(machine)
     except WebSocketDisconnect:
         manager.disconnect(machine)
+        log(f"runner disconnected: {machine}")
 
 
 async def reply(thread_id, text):
-    """Send a backend message to the supergroup (a topic, or General if thread_id None)."""
     if SUPERGROUP:
-        await tg.send_message(SUPERGROUP, text, message_thread_id=thread_id)
+        r = await tg.send_message(SUPERGROUP, text, message_thread_id=thread_id)
+        if r and not r.get("ok"):
+            log(f"sendMessage not ok: {r}")
+    else:
+        log("reply skipped — supergroup unknown")
