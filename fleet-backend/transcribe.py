@@ -35,8 +35,11 @@ async def _groq(audio: bytes) -> str:
             "https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             data={"model": "whisper-large-v3-turbo"},
-            files={"file": ("voice.oga", audio, "audio/ogg")},
+            # Telegram voice is OGG/Opus; Groq validates by extension -> use .ogg
+            files={"file": ("audio.ogg", audio, "audio/ogg")},
         )
+        if r.status_code >= 400:
+            log("groq error", r.status_code, r.text[:400])
         r.raise_for_status()
         return (r.json().get("text") or "").strip()
 
