@@ -18,6 +18,8 @@ dist/
 # runtime
 .inbox/
 .outbox/
+.fleet/
+.fleet-mcp.json
 *.log
 
 # os

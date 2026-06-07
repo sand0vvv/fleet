@@ -1,23 +1,26 @@
-"""runner — local fleet agent (one per machine).
+"""fleet-runner — local fleet agent (one per machine), as a small CLI.
 
-- Holds one outbound WS to fleet-backend (push channel down).
-- Heartbeats up over the WS.
-- Handles commands: spawn, deliver, kill, restart, stop, usage, compact.
-- headless mode: runs `claude --resume -p` per message; posts result + session up.
-- cli mode: TODO (needs channels-mcp). For now headless is the working path.
+Commands:
+  python runner.py start     # connect to backend and serve (default)
+  python runner.py doctor    # check env, backend reachability, claude CLI
+
+Holds one outbound WS to fleet-backend (push channel), heartbeats up, and handles
+commands: spawn, deliver, kill, restart, stop, usage, compact.
+  headless: runs `claude --resume -p --dangerously-skip-permissions` per message.
+  cli: TODO (needs live inject) — must also use --dangerously-skip-permissions.
 
 Env (.env next to this file or process env):
-  FLEET_BACKEND_HTTP   e.g. https://fleet-backend.up.railway.app
-  FLEET_BACKEND_WS     e.g. wss://fleet-backend.up.railway.app/ws/runner
-  MACHINE_NAME         e.g. home
-  RUNNER_TOKEN         shared secret for this machine
+  FLEET_BACKEND_HTTP, FLEET_BACKEND_WS, MACHINE_NAME, RUNNER_TOKEN
 """
 import os
 import sys
 import json
 import asyncio
 import pathlib
+import argparse
+import logging
 import urllib.parse
+from logging.handlers import RotatingFileHandler
 
 import httpx
 import websockets
@@ -33,17 +36,28 @@ BACKEND_WS = os.environ.get("FLEET_BACKEND_WS", "").rstrip("/")
 MACHINE = os.environ.get("MACHINE_NAME", "home")
 TOKEN = os.environ.get("RUNNER_TOKEN", "dev")
 
+# ── logging ──────────────────────────────────────────────────────────────────
+LOG_DIR = os.path.join(os.path.dirname(__file__), ".fleet", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+log = logging.getLogger("runner")
+log.setLevel(logging.INFO)
+_fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S")
+_fh = RotatingFileHandler(os.path.join(LOG_DIR, "runner.log"), maxBytes=2_000_000,
+                          backupCount=3, encoding="utf-8")
+_fh.setFormatter(_fmt)
+_ch = logging.StreamHandler()
+_ch.setFormatter(_fmt)
+log.addHandler(_fh)
+log.addHandler(_ch)
 
-def log(*a):
-    print("[runner]", *a, file=sys.stderr, flush=True)
 
-
+# ── helpers ──────────────────────────────────────────────────────────────────
 async def post(path, payload):
     try:
         async with httpx.AsyncClient(timeout=300) as c:
             await c.post(f"{BACKEND_HTTP}{path}", json=payload)
     except Exception as e:
-        log("post failed", path, e)
+        log.error(f"POST {path} failed: {e}")
 
 
 async def download(url, dest_dir):
@@ -55,36 +69,55 @@ async def download(url, dest_dir):
         r.raise_for_status()
         with open(dest, "wb") as f:
             f.write(r.content)
+    log.info(f"downloaded {url} -> {dest}")
     return dest
 
 
-async def run_claude(project, prompt, model, session_id):
-    """Invoke claude headless, return (result_text, session_id)."""
-    flags = "-p --output-format json --dangerously-skip-permissions"
+def _write_mcp_config(project, name):
+    """Write a per-agent .fleet-mcp.json wiring the channels MCP; return its path."""
+    server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "channels-mcp", "server.py"))
+    cfg = {"mcpServers": {"channels": {
+        "command": "python", "args": [server],
+        "env": {"FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": name}}}}
+    path = os.path.join(project, ".fleet-mcp.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    return path
+
+
+async def run_claude(project, prompt, model, session_id, name):
+    """Invoke claude headless (with channels MCP, skip-permissions). Returns (text, session_id)."""
+    cfg = _write_mcp_config(project, name)
+    args = ["-p", "--output-format", "json", "--dangerously-skip-permissions",
+            "--mcp-config", cfg]
     if model:
-        flags += f" --model {model}"
+        args += ["--model", model]
     if session_id:
-        flags += f" --resume {session_id}"
+        args += ["--resume", session_id]
+    log.info(f"run_claude name={name} model={model or 'default'} resume={bool(session_id)}")
 
     if os.name == "nt":
+        def _q(a):
+            return f'"{a}"' if " " in a else a
         proc = await asyncio.create_subprocess_shell(
-            f"claude {flags}", cwd=project,
+            "claude " + " ".join(_q(a) for a in args), cwd=project,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
     else:
         proc = await asyncio.create_subprocess_exec(
-            "claude", *flags.split(), cwd=project,
+            "claude", *args, cwd=project,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
 
     out, err = await proc.communicate(prompt.encode("utf-8"))
     raw = out.decode("utf-8", "replace").strip()
-    if err and not raw:
-        log("claude stderr:", err.decode("utf-8", "replace")[:500])
+    if proc.returncode != 0:
+        log.error(f"claude exit={proc.returncode} stderr={err.decode('utf-8','replace')[:400]}")
     try:
         data = json.loads(raw)
         return data.get("result", raw), data.get("session_id", session_id)
     except Exception:
+        log.error(f"claude output not json: {raw[:200]!r}")
         return raw or "(пустой ответ)", session_id
 
 
@@ -92,6 +125,7 @@ async def handle(cmd):
     t = cmd.get("type")
     name = cmd.get("agent")
     project = cmd.get("project_path")
+    log.info(f"cmd {t} agent={name}")
 
     if t == "spawn":
         if project:
@@ -99,27 +133,24 @@ async def handle(cmd):
         await post(f"/agent/{name}/out", {"text": f"🟢 {name} на связи ({cmd.get('mode')})"})
 
     elif t == "deliver":
-        mode = cmd.get("mode", "headless")
-        if mode == "cli":
-            await post(f"/agent/{name}/out", {"text": "⚠️ cli-режим ещё не готов, поставь /mode " + name + " headless"})
+        if cmd.get("mode") == "cli":
+            await post(f"/agent/{name}/out", {"text": f"⚠️ cli-режим ещё не готов, поставь /mode {name} headless"})
             return
-        # download incoming files into .inbox, note their paths in the prompt
         note = ""
         for url in cmd.get("files") or []:
             try:
                 dest = await download(url, os.path.join(project, ".inbox"))
                 note += f"[файл получен: {dest}]\n"
             except Exception as e:
-                log("download failed", e)
+                log.error(f"download failed: {e}")
         prompt = (note + (cmd.get("text") or "")).strip() or "(пусто)"
         await post(f"/agent/{name}/session", {"session_id": cmd.get("session_id"), "status": "running"})
-        result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"))
+        result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"), name)
         await post(f"/agent/{name}/out", {"text": result})
         await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
 
     elif t in ("kill", "stop", "restart"):
-        # headless has no persistent process; ack only (cli will use this later)
-        log(f"{t} {name} (no-op for headless)")
+        log.info(f"{t} {name} (no-op for headless)")
 
     elif t in ("usage", "compact"):
         await post(f"/agent/{name}/out", {"text": f"/{t}: ещё не реализовано"})
@@ -134,33 +165,66 @@ async def heartbeat(ws):
             return
 
 
-async def session():
+async def serve_once():
     url = f"{BACKEND_WS}?machine={MACHINE}&token={TOKEN}"
     async with websockets.connect(url, max_size=None) as ws:
-        log("connected to", BACKEND_WS, "as", MACHINE)
+        log.info(f"connected to {BACKEND_WS} as {MACHINE}")
         hb = asyncio.create_task(heartbeat(ws))
         try:
             async for raw in ws:
                 try:
                     cmd = json.loads(raw)
                 except Exception:
+                    log.error(f"bad ws frame: {raw[:120]!r}")
                     continue
                 asyncio.create_task(handle(cmd))
         finally:
             hb.cancel()
 
 
-async def main():
+async def start():
     if not BACKEND_WS or not BACKEND_HTTP:
-        log("set FLEET_BACKEND_HTTP and FLEET_BACKEND_WS")
+        log.error("set FLEET_BACKEND_HTTP and FLEET_BACKEND_WS in .env")
         sys.exit(1)
+    log.info(f"runner starting (machine={MACHINE}, logs={LOG_DIR})")
     while True:
         try:
-            await session()
+            await serve_once()
         except Exception as e:
-            log("ws error, reconnecting in 5s:", e)
+            log.error(f"ws error, reconnecting in 5s: {e}")
         await asyncio.sleep(5)
 
 
+def doctor():
+    print(f"machine        : {MACHINE}")
+    print(f"backend http   : {BACKEND_HTTP or '(unset!)'}")
+    print(f"backend ws     : {BACKEND_WS or '(unset!)'}")
+    print(f"runner token   : {'set' if TOKEN and TOKEN != 'dev' else '(default/dev)'}")
+    print(f"logs           : {LOG_DIR}")
+    # backend health
+    try:
+        r = httpx.get(f"{BACKEND_HTTP}/health", timeout=10)
+        print(f"backend /health: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"backend /health: FAIL {e}")
+    # claude
+    import subprocess
+    try:
+        v = subprocess.run("claude --version", shell=True, capture_output=True, text=True, timeout=20)
+        print(f"claude         : {(v.stdout or v.stderr).strip()}")
+    except Exception as e:
+        print(f"claude         : FAIL {e}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="fleet-runner")
+    p.add_argument("cmd", nargs="?", default="start", choices=["start", "doctor"])
+    args = p.parse_args()
+    if args.cmd == "doctor":
+        doctor()
+    else:
+        asyncio.run(start())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -7,8 +7,9 @@ Telegram --webhook--> receiver --POST /tg/update--> here
 Agent reply: runner --POST /agent/{name}/out--> here -> sendMessage to topic.
 Runners connect via WS /ws/runner?machine=&token=.
 """
+import os
 import sys
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 
 import db
 import telegram as tg
@@ -245,22 +246,40 @@ def _help_text():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.post("/agent/{name}/out")
 async def agent_out(name: str, req: Request):
+    """Text reply from an agent -> its Telegram topic."""
     body = await req.json()
     a = db.get_agent(name)
     if not a or not SUPERGROUP:
         log(f"agent_out: no agent '{name}' or no supergroup")
         return {"ok": False}
     text = body.get("text", "")
-    files = body.get("files") or []
-    log(f"agent_out {name}: text={text[:80]!r} files={len(files)}")
+    log(f"agent_out {name}: text={text[:80]!r}")
     if text:
         r = await tg.send_message(SUPERGROUP, text, message_thread_id=a["topic_id"])
         tgid = (r.get("result") or {}).get("message_id") if r else None
         db.log_message(a["id"], "out", text, tg_message_id=tgid)
-    for fp in files:
-        is_img = fp.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
-        send = tg.send_photo if is_img else tg.send_document
-        await send(SUPERGROUP, fp, caption=None, message_thread_id=a["topic_id"])
+    return {"ok": True}
+
+
+@app.post("/agent/{name}/file")
+async def agent_file(name: str, file: UploadFile = File(...), caption: str = Form("")):
+    """File upload from an agent (via channels-mcp) -> its Telegram topic."""
+    a = db.get_agent(name)
+    if not a or not SUPERGROUP:
+        return {"ok": False}
+    fname = file.filename or "file"
+    tmp = f"/tmp/out_{abs(hash(name))}_{os.path.basename(fname)}"
+    with open(tmp, "wb") as f:
+        f.write(await file.read())
+    is_img = fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+    send = tg.send_photo if is_img else tg.send_document
+    await send(SUPERGROUP, tmp, caption=caption or None, message_thread_id=a["topic_id"])
+    db.log_message(a["id"], "out", caption or f"[file: {fname}]", "doc")
+    log(f"agent_file {name}: {fname}")
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
     return {"ok": True}
 
 
