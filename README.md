@@ -49,7 +49,11 @@ Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Rail
 1. `claude` установлен и залогинен, Node, Python.
 2. `cd fleet-mcp && npm install`
 3. `runner/.env`: `FLEET_BACKEND_HTTP`, `FLEET_BACKEND_WS`, `MACHINE_NAME`, `RUNNER_TOKEN`
-4. `python runner/runner.py` (или `python runner/runner.py doctor` для самопроверки)
+4. `python runner/runner.py` — старт (баннер + логи в консоль/`.fleet/logs/`).
+   - `python runner/runner.py doctor` — самопроверка (env, backend /health, claude)
+   - `python runner/runner.py status` — живое состояние (`.fleet/status.json`: connected, cli-агенты, PID)
+
+Runner — это CLI-приложение: автoreconnect WS, watchdog (ловит упавшие cli-окна → пишет в топик `/restart`), ротация логов, чистка cli-окон при Ctrl+C.
 
 ## CI / релизы
 GitHub Actions (ruff + pytest + py_compile + node --check) на каждый push. Релизы — по фичам (`v0.x.0`).

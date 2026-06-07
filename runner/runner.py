@@ -44,6 +44,8 @@ CHANNEL_MODE = os.environ.get("FLEET_CHANNEL_MODE", "dev")
 
 _agent_locks = {}  # serialize claude runs per agent (one session at a time)
 _cli_procs = {}    # name -> Popen (cli-mode visible windows)
+_connected = False  # WS link to backend up?
+STATUS_PATH = os.path.join(os.path.dirname(__file__), ".fleet", "status.json")
 
 # ── logging ──────────────────────────────────────────────────────────────────
 LOG_DIR = os.path.join(os.path.dirname(__file__), ".fleet", "logs")
@@ -411,9 +413,36 @@ async def heartbeat(ws):
             return
 
 
+def _write_status():
+    procs = [{"name": n, "pid": p.pid, "alive": p.poll() is None} for n, p in _cli_procs.items()]
+    data = {"machine": MACHINE, "channel_mode": CHANNEL_MODE, "backend": BACKEND_HTTP,
+            "connected": _connected, "cli_agents": procs,
+            "updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        with open(STATUS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+async def monitor():
+    """Watchdog: detect crashed cli windows, notify owner, keep status.json fresh."""
+    while True:
+        for n, p in list(_cli_procs.items()):
+            if p.poll() is not None:
+                log.info(f"cli window for {n} exited (code {p.returncode})")
+                _cli_procs.pop(n, None)
+                await post(f"/agent/{n}/out", {"text": f"⚠️ cli-окно агента «{n}» закрылось. /restart {n} чтобы поднять."})
+        _write_status()
+        await asyncio.sleep(15)
+
+
 async def serve_once():
+    global _connected
     url = f"{BACKEND_WS}?machine={MACHINE}&token={TOKEN}"
     async with websockets.connect(url, max_size=None) as ws:
+        _connected = True
+        _write_status()
         log.info(f"connected to {BACKEND_WS} as {MACHINE}")
         hb = asyncio.create_task(heartbeat(ws))
         try:
@@ -425,6 +454,8 @@ async def serve_once():
                     continue
                 asyncio.create_task(handle(cmd))
         finally:
+            _connected = False
+            _write_status()
             hb.cancel()
 
 
@@ -437,12 +468,20 @@ async def start():
     log.info(f"  backend : {BACKEND_HTTP}")
     log.info(f"  logs    : {os.path.join(LOG_DIR, 'runner.log')}")
     log.info("=" * 56)
+    asyncio.create_task(monitor())
     while True:
         try:
             await serve_once()
         except Exception as e:
             log.error(f"ws error, reconnecting in 5s: {e}")
         await asyncio.sleep(5)
+
+
+def show_status():
+    if os.path.exists(STATUS_PATH):
+        print(open(STATUS_PATH, encoding="utf-8").read())
+    else:
+        print("runner ещё не запускался (нет status.json)")
 
 
 def doctor():
@@ -478,10 +517,13 @@ def _kill_cli_procs():
 
 def main():
     p = argparse.ArgumentParser(prog="fleet-runner")
-    p.add_argument("cmd", nargs="?", default="start", choices=["start", "doctor"])
+    p.add_argument("cmd", nargs="?", default="start", choices=["start", "doctor", "status"])
     args = p.parse_args()
     if args.cmd == "doctor":
         doctor()
+        return
+    if args.cmd == "status":
+        show_status()
         return
     try:
         asyncio.run(start())
