@@ -1,0 +1,25 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
+dist/
+
+# runtime
+.inbox/
+.outbox/
+*.log
+
+# os
+.DS_Store
+Thumbs.db
