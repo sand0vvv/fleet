@@ -2,54 +2,49 @@
 /**
  * fleet-mcp — MCP server given to every opt-in Claude Code (server name: "fleet").
  *
- * Tools (always): send_message, send_file  -> POST to fleet-backend -> owner's topic.
+ * Tools (always): send_message, send_file -> POST to fleet-backend -> owner's topic.
  * cli mode (FLEET_MODE=cli): opens a WS to the backend per-agent stream and injects
- *   incoming owner messages into the LIVE session via `notifications/claude/channel`
- *   (Claude Code Channels — requires launching claude with
- *    `--dangerously-load-development-channels server:fleet`).
+ *   incoming owner messages into the LIVE session via `notifications/claude/channel`.
  *
- * Env (injected by runner):
- *   FLEET_BACKEND_HTTP, FLEET_AGENT_NAME, [FLEET_MODE=cli], [FLEET_STREAM_WS]
+ * Logs to <cwd>/.fleet/fleet-mcp.log (cwd = the agent's project dir).
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import WebSocket from "ws";
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { basename, join } from "node:path";
 
 const BACKEND = (process.env.FLEET_BACKEND_HTTP || "").replace(/\/$/, "");
 const AGENT = process.env.FLEET_AGENT_NAME || "";
 const MODE = process.env.FLEET_MODE || "headless";
 const STREAM_WS = process.env.FLEET_STREAM_WS || "";
 
+const LOGDIR = join(process.cwd(), ".fleet");
+try { mkdirSync(LOGDIR, { recursive: true }); } catch { /* ignore */ }
+const LOGFILE = join(LOGDIR, "fleet-mcp.log");
+function flog(...a) {
+  const line = `${new Date().toISOString()} ${a.join(" ")}\n`;
+  try { appendFileSync(LOGFILE, line); } catch { /* ignore */ }
+  console.error("[fleet-mcp]", ...a);
+}
+
 const INSTRUCTIONS =
   "Ты — агент флота. Сообщения владельца приходят как channel-уведомления (📨). " +
-  "Чтобы ответить владельцу — вызови инструмент `send_message`. Чтобы отправить файл — `send_file`. " +
-  "Обычный текст ответа в консоли владелец НЕ видит; видит только то, что ты отправил через эти тулзы.";
+  "Чтобы ответить владельцу — вызови инструмент `send_message`. Файлы — `send_file`. " +
+  "Обычный текст в консоли владелец НЕ видит; видит только отправленное через эти тулзы.";
 
 const server = new Server(
   { name: "fleet", version: "0.1.0" },
   { capabilities: { tools: {} }, instructions: INSTRUCTIONS }
 );
 
-// ── tools ────────────────────────────────────────────────────────────────────
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
-    {
-      name: "send_message",
-      description: "Отправить текстовое сообщение владельцу в Telegram (в топик этого агента).",
-      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-    },
-    {
-      name: "send_file",
-      description: "Отправить файл (картинку/документ) владельцу в Telegram. path — локальный путь.",
-      inputSchema: {
-        type: "object",
-        properties: { path: { type: "string" }, caption: { type: "string" } },
-        required: ["path"],
-      },
-    },
+    { name: "send_message", description: "Отправить текст владельцу в Telegram (топик агента).",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
+    { name: "send_file", description: "Отправить файл владельцу в Telegram. path — локальный путь.",
+      inputSchema: { type: "object", properties: { path: { type: "string" }, caption: { type: "string" } }, required: ["path"] } },
   ],
 }));
 
@@ -58,10 +53,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     if (name === "send_message") {
       await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/out`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
+        method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: args.text }),
       });
+      flog("send_message ok");
       return { content: [{ type: "text", text: "sent" }] };
     }
     if (name === "send_file") {
@@ -70,50 +65,50 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       fd.append("file", new Blob([buf]), basename(args.path));
       fd.append("caption", args.caption || "");
       await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/file`, { method: "POST", body: fd });
+      flog("send_file ok", args.path);
       return { content: [{ type: "text", text: "sent" }] };
     }
     return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true };
   } catch (e) {
+    flog("tool error:", e.message);
     return { content: [{ type: "text", text: `error: ${e.message}` }], isError: true };
   }
 });
 
-// ── cli mode: receive owner messages over WS, inject into live session ────────
-function injectChannel(text) {
+async function injectChannel(text) {
   const content = `📨 Сообщение от владельца:\n\n${text}`;
-  // Native Claude Code channel (server:fleet). Falls back to a log notification.
-  server.notification({ method: "notifications/claude/channel", params: { content, meta: { source: "fleet" } } })
-    .catch(() => {});
-  server.notification({ method: "notifications/message", params: { level: "info", logger: "fleet", data: content } })
-    .catch(() => {});
+  try {
+    await server.notification({ method: "notifications/claude/channel", params: { content, meta: { source: "fleet" } } });
+    flog("injected channel notification");
+  } catch (e) {
+    flog("channel notify failed:", e.message);
+  }
 }
 
 function connectStream() {
-  if (!STREAM_WS) {
-    console.error("[fleet-mcp] cli mode but FLEET_STREAM_WS not set");
-    return;
-  }
+  if (!STREAM_WS) { flog("cli mode but FLEET_STREAM_WS empty!"); return; }
+  flog("connecting stream:", STREAM_WS);
   const ws = new WebSocket(STREAM_WS);
-  ws.on("open", () => console.error(`[fleet-mcp] stream open for @${AGENT}`));
+  ws.on("open", () => flog("stream OPEN for", AGENT));
   ws.on("message", (data) => {
+    flog("stream msg:", data.toString().slice(0, 200));
     try {
       const msg = JSON.parse(data.toString());
       let text = msg.text || "";
       if (msg.files && msg.files.length) text += `\n[файлы: ${msg.files.join(", ")}]`;
       if (text.trim()) injectChannel(text);
-    } catch (e) {
-      console.error("[fleet-mcp] bad stream frame:", e.message);
-    }
+    } catch (e) { flog("bad stream frame:", e.message); }
   });
-  ws.on("close", () => { setTimeout(connectStream, 3000); });
-  ws.on("error", (e) => console.error("[fleet-mcp] stream error:", e.message));
+  ws.on("close", (c) => { flog("stream CLOSE", c, "-> reconnect 3s"); setTimeout(connectStream, 3000); });
+  ws.on("error", (e) => flog("stream ERROR:", e.message));
 }
 
 async function main() {
+  flog(`startup agent=${AGENT} mode=${MODE} backend=${BACKEND} stream=${STREAM_WS || "(none)"}`);
   if (MODE === "cli") connectStream();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[fleet-mcp] ready (agent=${AGENT}, mode=${MODE})`);
+  flog("MCP connected (stdio)");
 }
 
-main().catch((e) => { console.error("[fleet-mcp] fatal:", e); process.exit(1); });
+main().catch((e) => { flog("fatal:", e.message); process.exit(1); });
