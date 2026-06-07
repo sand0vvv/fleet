@@ -39,7 +39,8 @@ Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Rail
 - `/list` · `/machines` · `/status <a>` · `/kill <a>` (полный снос: процесс+топик+БД)
 - `/restart <a>` · `/mode <a> <headless|cli>` · `/model <a> <m>` · `/rename <a> <title>`
 - `/sessions <a>` · `/use <a> <id>` — список/выбор сессии папки
-- `/new <a>` · `/stop <a>` · `/compact <a>` · `/usage` (только в General) · `/help`
+- `/new <a>` · `/stop <a>` · `/compact <a>` · `/help`
+- `/usage` (только в General) — реальная панель лимитов Claude (сессия 5ч / неделя / неделя Sonnet) через `/api/oauth/usage` (токен из `~/.claude/.credentials.json` на runner-машине)
 
 ## Структура репо
 `receiver/` · `fleet-backend/` · `runner/` · `fleet-mcp/` · `migrations/`

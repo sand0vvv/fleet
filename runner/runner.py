@@ -281,6 +281,37 @@ def _list_sessions(project):
     return [(sid, datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")) for sid, ts in out]
 
 
+def _usage_panel():
+    """Real Claude usage limits (session 5h / weekly) via /api/oauth/usage + local creds."""
+    try:
+        tok = json.load(open(os.path.expanduser("~/.claude/.credentials.json"),
+                             encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+        r = httpx.get("https://api.anthropic.com/api/oauth/usage",
+                      headers={"Authorization": f"Bearer {tok}"}, timeout=20)
+        d = r.json()
+
+        def fmt(block, label):
+            if not block or block.get("utilization") is None:
+                return None
+            t = ""
+            ra = block.get("resets_at")
+            if ra:
+                try:
+                    t = " · сброс " + datetime.datetime.fromisoformat(ra).astimezone().strftime("%d.%m %H:%M")
+                except Exception:
+                    pass
+            return f"{label}: {block['utilization']:.0f}%{t}"
+
+        lines = [x for x in [
+            fmt(d.get("five_hour"), "Сессия (5ч)"),
+            fmt(d.get("seven_day"), "Неделя (все модели)"),
+            fmt(d.get("seven_day_sonnet"), "Неделя (Sonnet)"),
+        ] if x]
+        return "📊 Usage\n" + "\n".join(lines) if lines else "📊 usage: нет данных"
+    except Exception as e:
+        return f"usage ошибка: {e}"
+
+
 async def handle(cmd):
     t = cmd.get("type")
     name = cmd.get("agent")
@@ -336,15 +367,7 @@ async def handle(cmd):
         await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
 
     elif t == "usage_all":
-        s = _load_stats()
-        if not s["agents"]:
-            await post("/usage_report", {"text": "📊 расход пока нулевой (трекинг с момента запуска)"})
-        else:
-            lines = [f"• {n}: ${a['cost']:.4f} · {a['in']}/{a['out']} tok · {a['runs']} зап."
-                     for n, a in s["agents"].items()]
-            total = sum(a["cost"] for a in s["agents"].values())
-            await post("/usage_report", {"text": "📊 Расход флота (фактический):\n" + "\n".join(lines)
-                                         + f"\nИТОГО: ${total:.4f}\n(реальная панель 5h/неделя — отдельным шагом)"})
+        await post("/usage_report", {"text": _usage_panel()})
 
     elif t == "list_sessions":
         sessions = _list_sessions(project)
