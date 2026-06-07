@@ -36,6 +36,8 @@ BACKEND_WS = os.environ.get("FLEET_BACKEND_WS", "").rstrip("/")
 MACHINE = os.environ.get("MACHINE_NAME", "home")
 TOKEN = os.environ.get("RUNNER_TOKEN", "dev")
 
+_agent_locks = {}  # serialize claude runs per agent (one session at a time)
+
 # ── logging ──────────────────────────────────────────────────────────────────
 LOG_DIR = os.path.join(os.path.dirname(__file__), ".fleet", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -182,18 +184,20 @@ async def handle(cmd):
         if cmd.get("mode") == "cli":
             await post(f"/agent/{name}/out", {"text": f"⚠️ cli-режим ещё не готов, поставь /mode {name} headless"})
             return
-        note = ""
-        for url in cmd.get("files") or []:
-            try:
-                dest = await download(url, os.path.join(project, ".inbox"))
-                note += f"[файл получен: {dest}]\n"
-            except Exception as e:
-                log.error(f"download failed: {e}")
-        prompt = (note + (cmd.get("text") or "")).strip() or "(пусто)"
-        await post(f"/agent/{name}/session", {"session_id": cmd.get("session_id"), "status": "running"})
-        result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"), name)
-        await post(f"/agent/{name}/out", {"text": result})
-        await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
+        lock = _agent_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            note = ""
+            for url in cmd.get("files") or []:
+                try:
+                    dest = await download(url, os.path.join(project, ".inbox"))
+                    note += f"[файл получен: {dest}]\n"
+                except Exception as e:
+                    log.error(f"download failed: {e}")
+            prompt = (note + (cmd.get("text") or "")).strip() or "(пусто)"
+            await post(f"/agent/{name}/session", {"session_id": cmd.get("session_id"), "status": "running"})
+            result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"), name)
+            await post(f"/agent/{name}/out", {"text": result})
+            await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
 
     elif t == "compact":
         # slash commands don't run in -p, so do a "soft compact":

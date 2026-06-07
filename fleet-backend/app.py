@@ -9,6 +9,7 @@ Runners connect via WS /ws/runner?machine=&token=.
 """
 import os
 import sys
+import asyncio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 
 import db
@@ -24,6 +25,49 @@ SUPERGROUP = config.SUPERGROUP_CHAT_ID or None
 
 def log(*a):
     print("[fleet]", *a, file=sys.stderr, flush=True)
+
+
+# ── debounce: collect a burst of messages per agent, deliver as one ──────────
+DEBOUNCE_SECONDS = int(os.environ.get("DEBOUNCE_SECONDS", "15"))
+_pending = {}   # agent_name -> {"texts": [...], "files": [...]}
+_timers = {}    # agent_name -> asyncio.Task
+
+
+def _enqueue(name, text, files):
+    buf = _pending.setdefault(name, {"texts": [], "files": []})
+    if text:
+        buf["texts"].append(text)
+    if files:
+        buf["files"].extend(files)
+    old = _timers.get(name)
+    if old:
+        old.cancel()
+    _timers[name] = asyncio.create_task(_flush_after(name))
+
+
+async def _flush_after(name):
+    try:
+        await asyncio.sleep(DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        return
+    buf = _pending.pop(name, None)
+    _timers.pop(name, None)
+    if not buf:
+        return
+    a = db.get_agent(name)
+    if not a:
+        return
+    text = "\n".join(t for t in buf["texts"] if t).strip()
+    files = buf["files"]
+    machine = _machine_of(a)
+    log(f"flush -> agent={name} machine={machine} text_len={len(text)} files={len(files)}")
+    pushed = await manager.push(machine, {
+        "type": "deliver", "agent": a["name"], "mode": a["mode"], "model": a["model"],
+        "project_path": a["project_path"], "session_id": a["session_id"],
+        "text": text, "files": files,
+    })
+    if not pushed:
+        await reply(a["topic_id"], "⚠️ машина агента оффлайн — runner не на связи")
 
 
 @app.get("/health")
@@ -83,6 +127,8 @@ async def tg_update(req: Request):
         if url:
             files.append(url)
 
+    text = util.forward_prefix(msg) + text  # tag forwarded messages
+
     agent = db.get_agent_by_topic(thread_id) if thread_id else None
 
     # log inbound to DB (always; agent_id null for General)
@@ -112,22 +158,8 @@ async def tg_update(req: Request):
         await handle_command(text, agent=agent)
         return {"ok": True}
 
-    machine = _machine_of(agent)
-    online = manager.is_online(machine) if machine else False
-    log(f"route -> agent={agent['name']} machine={machine} online={online} mode={agent['mode']}")
-    pushed = await manager.push(machine, {
-        "type": "deliver",
-        "agent": agent["name"],
-        "mode": agent["mode"],
-        "model": agent["model"],
-        "project_path": agent["project_path"],
-        "session_id": agent["session_id"],
-        "text": text,
-        "files": files,
-    })
-    if not pushed:
-        log("push FAILED — runner offline")
-        await reply(thread_id, "⚠️ машина агента оффлайн — runner не на связи")
+    log(f"enqueue -> agent={agent['name']} (debounce {DEBOUNCE_SECONDS}s)")
+    _enqueue(agent["name"], text, files)
     return {"ok": True}
 
 
@@ -293,7 +325,7 @@ async def agent_file(name: str, file: UploadFile = File(...), caption: str = For
         f.write(await file.read())
     is_img = fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
     send = tg.send_photo if is_img else tg.send_document
-    await send(SUPERGROUP, tmp, caption=caption or None, message_thread_id=a["topic_id"])
+    await send(SUPERGROUP, tmp, caption=caption or None, message_thread_id=a["topic_id"], filename=fname)
     db.log_message(a["id"], "out", caption or f"[file: {fname}]", "doc")
     log(f"agent_file {name}: {fname}")
     try:

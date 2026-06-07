@@ -1,4 +1,5 @@
 """Telegram Bot API client (async, httpx)."""
+import os
 import httpx
 from config import TG_API, TG_FILE
 
@@ -19,7 +20,7 @@ async def send_message(chat_id, text, message_thread_id=None, reply_to=None):
     return last
 
 
-async def send_document(chat_id, file_path, caption=None, message_thread_id=None):
+async def send_document(chat_id, file_path, caption=None, message_thread_id=None, filename=None):
     async with httpx.AsyncClient(timeout=120) as c:
         with open(file_path, "rb") as f:
             data = {"chat_id": str(chat_id)}
@@ -27,11 +28,12 @@ async def send_document(chat_id, file_path, caption=None, message_thread_id=None
                 data["caption"] = caption[:1024]
             if message_thread_id:
                 data["message_thread_id"] = str(message_thread_id)
-            r = await c.post(f"{TG_API}/sendDocument", data=data, files={"document": f})
+            r = await c.post(f"{TG_API}/sendDocument", data=data,
+                             files={"document": (filename or os.path.basename(file_path), f)})
             return r.json()
 
 
-async def send_photo(chat_id, file_path, caption=None, message_thread_id=None):
+async def send_photo(chat_id, file_path, caption=None, message_thread_id=None, filename=None):
     async with httpx.AsyncClient(timeout=120) as c:
         with open(file_path, "rb") as f:
             data = {"chat_id": str(chat_id)}
@@ -39,7 +41,8 @@ async def send_photo(chat_id, file_path, caption=None, message_thread_id=None):
                 data["caption"] = caption[:1024]
             if message_thread_id:
                 data["message_thread_id"] = str(message_thread_id)
-            r = await c.post(f"{TG_API}/sendPhoto", data=data, files={"photo": f})
+            r = await c.post(f"{TG_API}/sendPhoto", data=data,
+                             files={"photo": (filename or os.path.basename(file_path), f)})
             return r.json()
 
 
