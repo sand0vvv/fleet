@@ -152,7 +152,8 @@ async def session():
 
 async def main():
     if not BACKEND_WS or not BACKEND_HTTP:
-        log("set FLEET_BACKEND_HTTP and FLEET_BACKEND_WS"); sys.exit(1)
+        log("set FLEET_BACKEND_HTTP and FLEET_BACKEND_WS")
+        sys.exit(1)
     while True:
         try:
             await session()

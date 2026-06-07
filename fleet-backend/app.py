@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 import db
 import telegram as tg
 import transcribe
+import util
 from wsmanager import manager
 import config
 
@@ -165,8 +166,7 @@ async def cmd_spawn(args):
     m = db.get_machine(machine)
     if not m:
         return await reply(None, f"машина '{machine}' не зарегистрирована (runner не подключался)")
-    import os as _os
-    name = _os.path.basename(path.rstrip("/\\")) or machine
+    name = util.agent_name_from_path(path) or machine
     if not SUPERGROUP:
         return await reply(None, "не знаю chat_id супергруппы — напиши что-нибудь в группе")
     topic_id = await tg.create_forum_topic(SUPERGROUP, name)

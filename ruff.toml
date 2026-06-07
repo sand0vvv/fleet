@@ -1,0 +1,9 @@
+line-length = 120
+exclude = ["migrations"]
+
+[lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E402"]
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "E401"]
