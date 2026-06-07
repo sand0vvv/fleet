@@ -52,6 +52,11 @@ async def delete_forum_topic(chat_id, message_thread_id):
     return await _post("deleteForumTopic", chat_id=chat_id, message_thread_id=message_thread_id)
 
 
+async def edit_forum_topic(chat_id, message_thread_id, name):
+    return await _post("editForumTopic", chat_id=chat_id,
+                       message_thread_id=message_thread_id, name=name[:128])
+
+
 async def get_file_url(file_id):
     """Resolve a Telegram file_id to a temporary downloadable URL."""
     res = await _post("getFile", file_id=file_id)

@@ -154,6 +154,8 @@ async def handle_command(text, agent=None):
         await cmd_set(args, "mode")
     elif cmd == "model":
         await cmd_set(args, "model")
+    elif cmd == "rename":
+        await cmd_rename(args, agent)
     else:
         await reply(None, f"неизвестная команда: /{cmd}")
 
@@ -237,6 +239,21 @@ async def cmd_set(args, field):
         return await reply(None, "нет такого агента")
     db.update_agent(a["name"], **{field: args[1]})
     await reply(a["topic_id"], f"{a['name']}: {field} = {args[1]}")
+
+
+async def cmd_rename(args, agent):
+    """Rename an agent's Telegram topic. In topic: /rename <title>. In General: /rename <agent> <title>."""
+    if agent is None:
+        if len(args) < 2:
+            return await reply(None, "usage: /rename <agent> <title>")
+        agent = db.get_agent(args[0])
+        title = " ".join(args[1:])
+    else:
+        title = " ".join(args)
+    if not agent or not title:
+        return await reply(None, "нет агента или пустой заголовок")
+    await tg.edit_forum_topic(SUPERGROUP, agent["topic_id"], title)
+    await reply(agent["topic_id"], f"топик переименован: {title}")
 
 
 def _help_text():

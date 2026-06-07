@@ -196,13 +196,21 @@ async def handle(cmd):
         await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
 
     elif t == "compact":
+        # slash commands don't run in -p, so do a "soft compact":
+        # summarize the session, then start a fresh one seeded with that summary.
         sid = cmd.get("session_id")
         if not sid:
             await post(f"/agent/{name}/out", {"text": "compact: нет активной сессии"})
             return
-        result, newsid = await run_claude(project, "/compact", cmd.get("model"), sid, name)
+        summary, _ = await run_claude(
+            project,
+            "Сделай сжатое резюме нашего диалога для продолжения в НОВОЙ сессии: "
+            "ключевые факты, решения, открытые задачи, важный контекст. Только резюме.",
+            cmd.get("model"), sid, name)
+        seed = f"[Резюме предыдущей сессии]\n{summary}\n\nЭто контекст для продолжения. Подтверди коротко."
+        _, newsid = await run_claude(project, seed, cmd.get("model"), "", name)  # "" = fresh
         await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
-        await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат\n{result[:600]}"})
+        await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
 
     elif t == "usage":
         s = _load_stats()
