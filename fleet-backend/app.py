@@ -222,8 +222,11 @@ async def cmd_agent_op(op, args, agent):
     elif op == "new":
         db.update_agent(agent["name"], session_id=None)
         await reply(agent["topic_id"], "🆕 новая сессия (resume сброшен)")
-    else:
-        await manager.push(machine, {"type": op, "agent": agent["name"]})
+    else:  # stop | compact | usage
+        await manager.push(machine, {"type": op, "agent": agent["name"],
+                                     "project_path": agent["project_path"],
+                                     "session_id": agent["session_id"],
+                                     "model": agent["model"]})
 
 
 async def cmd_set(args, field):

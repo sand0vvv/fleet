@@ -50,6 +50,33 @@ _ch.setFormatter(_fmt)
 log.addHandler(_fh)
 log.addHandler(_ch)
 
+# ── usage stats (real spend, accumulated from claude json) ───────────────────
+STATS_PATH = os.path.join(LOG_DIR, "..", "stats.json")
+
+
+def _load_stats():
+    try:
+        with open(STATS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"agents": {}}
+
+
+def _save_stats(s):
+    with open(STATS_PATH, "w", encoding="utf-8") as f:
+        json.dump(s, f)
+
+
+def _record_stats(name, data):
+    s = _load_stats()
+    a = s["agents"].setdefault(name, {"cost": 0.0, "in": 0, "out": 0, "runs": 0})
+    a["cost"] += float(data.get("total_cost_usd") or 0)
+    u = data.get("usage") or {}
+    a["in"] += int(u.get("input_tokens") or 0)
+    a["out"] += int(u.get("output_tokens") or 0)
+    a["runs"] += 1
+    _save_stats(s)
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 async def post(path, payload):
@@ -115,6 +142,10 @@ async def run_claude(project, prompt, model, session_id, name):
         log.error(f"claude exit={proc.returncode} stderr={err.decode('utf-8','replace')[:400]}")
     try:
         data = json.loads(raw)
+        try:
+            _record_stats(name, data)
+        except Exception as e:
+            log.error(f"stats record failed: {e}")
         return data.get("result", raw), data.get("session_id", session_id)
     except Exception:
         log.error(f"claude output not json: {raw[:200]!r}")
@@ -149,11 +180,26 @@ async def handle(cmd):
         await post(f"/agent/{name}/out", {"text": result})
         await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
 
+    elif t == "compact":
+        sid = cmd.get("session_id")
+        if not sid:
+            await post(f"/agent/{name}/out", {"text": "compact: нет активной сессии"})
+            return
+        result, newsid = await run_claude(project, "/compact", cmd.get("model"), sid, name)
+        await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
+        await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат\n{result[:600]}"})
+
+    elif t == "usage":
+        s = _load_stats()
+        a = s["agents"].get(name, {"cost": 0.0, "in": 0, "out": 0, "runs": 0})
+        total = sum(x.get("cost", 0) for x in s["agents"].values())
+        await post(f"/agent/{name}/out", {"text":
+            f"📊 {name}\nрасход: ${a['cost']:.4f} · токены in/out: {a['in']}/{a['out']} · "
+            f"запусков: {a['runs']}\nвсего по флоту: ${total:.4f}\n"
+            f"(лимиты 5h/неделя через headless недоступны — это фактический расход)"})
+
     elif t in ("kill", "stop", "restart"):
         log.info(f"{t} {name} (no-op for headless)")
-
-    elif t in ("usage", "compact"):
-        await post(f"/agent/{name}/out", {"text": f"/{t}: ещё не реализовано"})
 
 
 async def heartbeat(ws):
