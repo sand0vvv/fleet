@@ -112,17 +112,7 @@ def _write_mcp_config(project, name):
     return path
 
 
-async def run_claude(project, prompt, model, session_id, name):
-    """Invoke claude headless (with channels MCP, skip-permissions). Returns (text, session_id)."""
-    cfg = _write_mcp_config(project, name)
-    args = ["-p", "--output-format", "json", "--dangerously-skip-permissions",
-            "--mcp-config", cfg]
-    if model:
-        args += ["--model", model]
-    if session_id:
-        args += ["--resume", session_id]
-    log.info(f"run_claude name={name} model={model or 'default'} resume={bool(session_id)}")
-
+async def _exec(args, project, prompt):
     if os.name == "nt":
         def _q(a):
             return f'"{a}"' if " " in a else a
@@ -135,21 +125,44 @@ async def run_claude(project, prompt, model, session_id, name):
             "claude", *args, cwd=project,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
-
     out, err = await proc.communicate(prompt.encode("utf-8"))
-    raw = out.decode("utf-8", "replace").strip()
-    if proc.returncode != 0:
-        log.error(f"claude exit={proc.returncode} stderr={err.decode('utf-8','replace')[:400]}")
-    try:
-        data = json.loads(raw)
+    return out.decode("utf-8", "replace").strip(), proc.returncode, err.decode("utf-8", "replace")
+
+
+async def run_claude(project, prompt, model, session_id, name):
+    """Invoke claude headless (channels MCP, skip-permissions). Returns (text, session_id).
+
+    No stored session yet -> try --continue (attach to the latest existing session
+    in this folder so it remembers prior context), fall back to a fresh session.
+    """
+    cfg = _write_mcp_config(project, name)
+    base = ["-p", "--output-format", "json", "--dangerously-skip-permissions", "--mcp-config", cfg]
+    if model:
+        base += ["--model", model]
+    if session_id:
+        attempts = [("resume", base + ["--resume", session_id])]
+    else:
+        attempts = [("continue", base + ["--continue"]), ("fresh", base)]
+
+    last = ""
+    for label, args in attempts:
+        log.info(f"run_claude name={name} via={label} model={model or 'default'}")
+        raw, rc, err = await _exec(args, project, prompt)
+        last = raw
+        if rc != 0:
+            log.error(f"claude({label}) exit={rc} stderr={err[:300]}")
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            log.error(f"claude({label}) non-json: {raw[:200]!r}")
+            continue
         try:
             _record_stats(name, data)
         except Exception as e:
             log.error(f"stats record failed: {e}")
         return data.get("result", raw), data.get("session_id", session_id)
-    except Exception:
-        log.error(f"claude output not json: {raw[:200]!r}")
-        return raw or "(пустой ответ)", session_id
+    return last or "(пустой ответ)", session_id
 
 
 async def handle(cmd):
