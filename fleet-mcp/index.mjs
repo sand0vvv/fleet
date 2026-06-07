@@ -12,7 +12,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import WebSocket from "ws";
-import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 const BACKEND = (process.env.FLEET_BACKEND_HTTP || "").replace(/\/$/, "");
@@ -94,17 +94,34 @@ async function injectChannel(text) {
   }
 }
 
+async function downloadToInbox(url) {
+  const inbox = join(process.cwd(), ".inbox");
+  try { mkdirSync(inbox, { recursive: true }); } catch { /* ignore */ }
+  const name = decodeURIComponent((url.split("/").pop() || "file").split("?")[0]) || "file";
+  const dest = join(inbox, name);
+  const res = await fetch(url);
+  writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+  return dest;
+}
+
 function connectStream() {
   if (!STREAM_WS) { flog("cli mode but FLEET_STREAM_WS empty!"); return; }
   flog("connecting stream:", STREAM_WS);
   const ws = new WebSocket(STREAM_WS);
   ws.on("open", () => flog("stream OPEN for", AGENT));
-  ws.on("message", (data) => {
+  ws.on("message", async (data) => {
     flog("stream msg:", data.toString().slice(0, 200));
     try {
       const msg = JSON.parse(data.toString());
       let text = msg.text || "";
-      if (msg.files && msg.files.length) text += `\n[файлы: ${msg.files.join(", ")}]`;
+      if (msg.files && msg.files.length) {
+        const paths = [];
+        for (const u of msg.files) {
+          try { paths.push(await downloadToInbox(u)); }
+          catch (e) { flog("download fail:", e.message); paths.push(u); }
+        }
+        text += `\n[файлы получены: ${paths.join(", ")}]`;
+      }
       if (text.trim()) injectChannel(text);
     } catch (e) { flog("bad stream frame:", e.message); }
   });
