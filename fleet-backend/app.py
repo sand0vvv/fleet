@@ -508,6 +508,18 @@ async def fleet_command(req: Request):
     return {"ok": True}
 
 
+@app.post("/agent/{name}/inject")
+async def agent_inject(name: str, req: Request):
+    """External services (e.g. tac-backend) push a message/alert into a cli agent's live session."""
+    body = await req.json()
+    ok = await push_stream(name, {"type": "message", "text": body.get("text", "")})
+    if not ok:
+        a = db.get_agent(name)
+        if a and a.get("topic_id"):
+            await reply(a["topic_id"], body.get("text", ""))  # fallback: post to topic
+    return {"ok": True}
+
+
 @app.post("/agent/{name}/session")
 async def agent_session(name: str, req: Request):
     body = await req.json()
