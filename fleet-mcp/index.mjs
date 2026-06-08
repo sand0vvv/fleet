@@ -20,6 +20,7 @@ const AGENT = process.env.FLEET_AGENT_NAME || "";
 const MODE = process.env.FLEET_MODE || "headless";
 const STREAM_WS = process.env.FLEET_STREAM_WS || "";
 const TOKEN = process.env.FLEET_TOKEN || "";
+const CONTROL = process.env.FLEET_CONTROL === "1";  // coordinator gets fleet_command
 
 const LOGDIR = join(process.cwd(), ".fleet");
 try { mkdirSync(LOGDIR, { recursive: true }); } catch { /* ignore */ }
@@ -49,14 +50,23 @@ const server = new Server(
   }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const tools = [
     { name: "send_message", description: "Отправить текст владельцу в Telegram (топик агента).",
       inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { name: "send_file", description: "Отправить файл владельцу в Telegram. path — локальный путь.",
       inputSchema: { type: "object", properties: { path: { type: "string" }, caption: { type: "string" } }, required: ["path"] } },
-  ],
-}));
+  ];
+  if (CONTROL) {
+    tools.push({
+      name: "fleet_command",
+      description: "Управление флотом — выполнить слэш-команду: /spawn <machine> <path> [headless|cli] [model], "
+        + "/list, /machines, /kill <name>, /restart <name>, /mode <name> <m>, /model, /rename, /sessions, /use, /new, /stop, /compact.",
+      inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    });
+  }
+  return { tools };
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
@@ -78,6 +88,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         { method: "POST", headers: { "x-fleet-token": TOKEN }, body: fd });
       flog("send_file ok", args.path);
       return { content: [{ type: "text", text: "sent" }] };
+    }
+    if (name === "fleet_command" && CONTROL) {
+      await fetch(`${BACKEND}/fleet/command`, {
+        method: "POST", headers: { "content-type": "application/json", "x-fleet-token": TOKEN },
+        body: JSON.stringify({ command: args.command }),
+      });
+      flog("fleet_command:", args.command);
+      return { content: [{ type: "text", text: "executed: " + args.command }] };
     }
     return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true };
   } catch (e) {

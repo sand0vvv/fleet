@@ -365,30 +365,36 @@ async def _detect_cli_session(name, project):
 
 
 async def _coordinate(text, agents, machines):
-    """NL -> one slash command, via a cheap headless claude (coordinator)."""
+    """Full coordinator agent: headless, FRESH session each request (context auto-resets).
+    Can mkdir/scaffold via Bash/Write and manage the fleet via the fleet_command tool.
+    Posts its natural-language reply to General."""
+    proj = os.path.join(os.path.expanduser("~"), ".fleet-coordinator")
+    pathlib.Path(proj).mkdir(parents=True, exist_ok=True)
+    server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
+    cfg = {"mcpServers": {"fleet": {"command": "node", "args": [server], "env": {
+        "FLEET_BACKEND_HTTP": BACKEND_HTTP, "FLEET_AGENT_NAME": "coordinator",
+        "FLEET_TOKEN": TOKEN, "FLEET_CONTROL": "1"}}}}
+    cfgpath = os.path.join(proj, ".fleet-mcp.json")
+    with open(cfgpath, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
     spec = (
-        "Ты — координатор флота агентов. Преобразуй запрос владельца в ОДНУ команду.\n"
-        "Команды:\n"
-        "/spawn <machine> <path> [headless|cli] [model]\n"
-        "/list  /machines  /status <a>  /kill <a>  /restart <a>  /mode <a> <headless|cli>\n"
-        "/model <a> <m>  /rename <a> <title>  /sessions <a>  /use <a> <id>  /new <a>  /stop <a>  /compact <a>\n"
+        "Ты — координатор флота агентов. Возможности:\n"
+        "- создавать папки/файлы и выполнять команды (Bash/Write),\n"
+        "- управлять флотом тулзой fleet_command (слэш-команда): /spawn <machine> <path> [headless|cli] [model], "
+        "/list, /machines, /kill <name>, /restart <name>, /mode, /model, /rename, /sessions, /use, /new, /stop, /compact.\n"
         f"Машины: {', '.join(machines) or '—'}\n"
         f"Агенты: {json.dumps(agents, ensure_ascii=False)}\n"
         f"Запрос владельца: {text}\n"
-        "Ответь ТОЛЬКО одной строкой-командой (начинается с /). "
-        "Если неясно или не хватает данных (напр. пути) — ответь NONE."
+        "Выполни запрос и кратко отчитайся (финальный ответ уйдёт владельцу в Telegram)."
     )
-    args = ["-p", "--output-format", "json", "--dangerously-skip-permissions", "--model", "haiku"]
-    raw, _rc, _err = await _exec(args, os.path.expanduser("~"), spec)
+    args = ["-p", "--output-format", "json", "--dangerously-skip-permissions",
+            "--mcp-config", cfgpath, "--model", "sonnet"]
+    raw, _rc, _err = await _exec(args, proj, spec)
     try:
         res = (json.loads(raw).get("result") or "").strip()
     except Exception:
         res = raw.strip()
-    for line in res.splitlines():
-        line = line.strip().strip("`").strip()
-        if line.startswith("/"):
-            return line
-    return "NONE"
+    await post("/coordinate_reply", {"text": res or "(нет ответа)"})
 
 
 async def handle(cmd):
@@ -483,8 +489,7 @@ async def handle(cmd):
         await post(f"/agent/{name}/out", {"text": "runner: " + " · ".join(parts)})
 
     elif t == "coordinate":
-        cmdline = await _coordinate(cmd.get("text", ""), cmd.get("agents", []), cmd.get("machines", []))
-        await post("/coordinate_result", {"command": cmdline})
+        await _coordinate(cmd.get("text", ""), cmd.get("agents", []), cmd.get("machines", []))
 
     elif t in ("kill", "stop", "restart"):
         p = _cli_procs.pop(name, None)

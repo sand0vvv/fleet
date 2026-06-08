@@ -39,7 +39,8 @@ def _ok_token(tok):
 async def auth_mw(request: Request, call_next):
     if config.RUNNER_SECRET:
         path = request.url.path
-        protected = path.startswith("/agent/") or path in ("/usage_report", "/coordinate_result", "/tg/update")
+        protected = path.startswith("/agent/") or path in (
+            "/usage_report", "/coordinate_result", "/coordinate_reply", "/fleet/command", "/tg/update")
         if protected and not _ok_token(request.headers.get("x-fleet-token")):
             return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
     return await call_next(request)
@@ -468,6 +469,25 @@ async def coordinate_result(req: Request):
         await handle_command(cmdline)
     else:
         await reply(None, "не понял запрос — уточни или используй команды (/help)")
+    return {"ok": True}
+
+
+@app.post("/coordinate_reply")
+async def coordinate_reply(req: Request):
+    """Coordinator agent's natural-language reply -> General."""
+    body = await req.json()
+    await reply(None, body.get("text", ""))
+    return {"ok": True}
+
+
+@app.post("/fleet/command")
+async def fleet_command(req: Request):
+    """Coordinator's fleet_command tool -> execute a slash command."""
+    body = await req.json()
+    cmd = (body.get("command") or "").strip()
+    if cmd.startswith("/"):
+        log(f"fleet_command: {cmd}")
+        await handle_command(cmd)
     return {"ok": True}
 
 
