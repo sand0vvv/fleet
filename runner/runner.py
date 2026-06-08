@@ -178,14 +178,16 @@ def _unregister_project_mcp(project):
         pass
 
 
-def _spawn_cli(name, project, model):
+def _spawn_cli(name, project, model, session_id=None):
     """Launch a visible interactive claude window (cli mode) with channel injection."""
     _register_project_mcp(project, name, "cli")
-    if CHANNEL_MODE == "dev":
-        chan = ["--dangerously-load-development-channels", "server:fleet"]
-    else:
-        chan = ["--channels", "server:fleet"]  # approved path, no confirm prompt
+    chan = (["--dangerously-load-development-channels", "server:fleet"] if CHANNEL_MODE == "dev"
+            else ["--channels", "server:fleet"])
     parts = ["claude", *chan, "--dangerously-skip-permissions"]
+    if session_id:
+        parts += ["--resume", session_id]
+    elif _list_sessions(project):
+        parts += ["--continue"]  # resume latest existing session in folder
     if model:
         parts += ["--model", model]
     if os.name == "nt":
@@ -348,6 +350,14 @@ def _usage_panel():
         return f"usage ошибка: {e}"
 
 
+async def _detect_cli_session(name, project):
+    """After a cli window spawns, find its live session (newest .jsonl) and report it (-> DB + pin)."""
+    await asyncio.sleep(6)
+    sessions = _list_sessions(project)
+    if sessions:
+        await post(f"/agent/{name}/session", {"session_id": sessions[0][0], "status": "running"})
+
+
 async def _coordinate(text, agents, machines):
     """NL -> one slash command, via a cheap headless claude (coordinator)."""
     spec = (
@@ -387,6 +397,7 @@ async def handle(cmd):
         if cmd.get("mode") == "cli":
             try:
                 pid = _spawn_cli(name, project, cmd.get("model"))
+                asyncio.create_task(_detect_cli_session(name, project))
                 await post(f"/agent/{name}/out", {"text": f"🟢 {name} (cli) — окно открыто, pid {pid}"})
             except Exception as e:
                 log.error(f"cli spawn failed: {e}")
@@ -413,21 +424,35 @@ async def handle(cmd):
             await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
 
     elif t == "compact":
-        # slash commands don't run in -p, so do a "soft compact":
-        # summarize the session, then start a fresh one seeded with that summary.
+        # slash commands don't run in -p, so do a "soft compact": summarize -> fresh session.
+        # cli: close the window first, then restart it on the compacted session.
         sid = cmd.get("session_id")
         if not sid:
             await post(f"/agent/{name}/out", {"text": "compact: нет активной сессии"})
             return
-        summary, _ = await run_claude(
-            project,
-            "Сделай сжатое резюме нашего диалога для продолжения в НОВОЙ сессии: "
-            "ключевые факты, решения, открытые задачи, важный контекст. Только резюме.",
-            cmd.get("model"), sid, name)
+        is_cli = cmd.get("mode") == "cli"
+        if is_cli:
+            await post(f"/agent/{name}/out", {"text": "🗜 сжимаю: закрываю окно → резюме → рестарт на свежей сессии…"})
+            pp = _cli_procs.pop(name, None)
+            if pp:
+                try:
+                    pp.terminate()
+                except Exception:
+                    pass
+            await asyncio.sleep(2)  # let the window release the session file
+        summ_prompt = ("Сделай сжатое резюме нашего диалога для продолжения в НОВОЙ сессии: "
+                       "ключевые факты, решения, открытые задачи, важный контекст. Только резюме.")
+        summary, _ = await run_claude(project, summ_prompt, cmd.get("model"), sid, name)
         seed = f"[Резюме предыдущей сессии]\n{summary}\n\nЭто контекст для продолжения. Подтверди коротко."
         _, newsid = await run_claude(project, seed, cmd.get("model"), "", name)  # "" = fresh
-        await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
-        await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
+        if is_cli:
+            pid = _spawn_cli(name, project, cmd.get("model"), session_id=newsid)
+            await post(f"/agent/{name}/session", {"session_id": newsid, "status": "running"})
+            await post(f"/agent/{name}/out",
+                       {"text": f"🗜 сжато, окно перезапущено на свежей сессии (pid {pid}).\n\n{summary[:400]}"})
+        else:
+            await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
+            await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
 
     elif t == "usage_all":
         await post("/usage_report", {"text": _usage_panel()})
@@ -467,6 +492,7 @@ async def handle(cmd):
         if t == "restart" and cmd.get("mode") == "cli" and cmd.get("project_path"):
             try:
                 pid = _spawn_cli(name, cmd["project_path"], cmd.get("model"))
+                asyncio.create_task(_detect_cli_session(name, cmd["project_path"]))
                 await post(f"/agent/{name}/out", {"text": f"♻️ {name} (cli) перезапущен, pid {pid}"})
             except Exception as e:
                 await post(f"/agent/{name}/out", {"text": f"restart ошибка: {e}"})

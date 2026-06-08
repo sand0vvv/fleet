@@ -46,7 +46,9 @@ Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Rail
 - `/restart <a>` · `/mode <a> <headless|cli>` · `/model <a> <m>` · `/rename <a> <title>`
 - `/sessions <a>` · `/use <a> <id>` — список (id, время, размер) / выбор сессии папки
 - `/status <a>` — показывает **размер контекста сессии в токенах** (+ подсказку «пора /compact» при >150k), жив ли cli-процесс
-- `/compact <a>` — soft-compact: агент делает резюме → стартует свежая сессия с ним (работает для headless)
+- `/compact <a>` — soft-compact (резюме → свежая сессия). headless: новая сессия. **cli: закрывает окно → резюме → перезапускает окно на сжатой сессии.**
+
+**Сессия в закрепе:** текущий `session_id` агента закреплён (pinned) в его топике и хранится в `fleet.agents` — и ты, и агент знают активную сессию. Обновляется при смене (compact/new). cli-сессия автоопределяется (свежайший `.jsonl`).
 - `/new <a>` · `/stop <a>` · `/compact <a>` · `/help`
 - `/usage` (только в General) — реальная панель лимитов Claude (сессия 5ч / неделя / неделя Sonnet) через `/api/oauth/usage` (токен из `~/.claude/.credentials.json` на runner-машине)
 

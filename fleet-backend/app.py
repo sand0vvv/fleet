@@ -372,8 +372,8 @@ async def cmd_agent_op(op, args, agent):
     elif op == "new":
         db.update_agent(agent["name"], session_id="")  # "" = force fresh (not attach)
         await reply(agent["topic_id"], "🆕 новая сессия (resume сброшен)")
-    else:  # stop | compact | usage
-        await manager.push(machine, {"type": op, "agent": agent["name"],
+    else:  # stop | compact
+        await manager.push(machine, {"type": op, "agent": agent["name"], "mode": agent["mode"],
                                      "project_path": agent["project_path"],
                                      "session_id": agent["session_id"],
                                      "model": agent["model"]})
@@ -474,7 +474,19 @@ async def coordinate_result(req: Request):
 @app.post("/agent/{name}/session")
 async def agent_session(name: str, req: Request):
     body = await req.json()
-    db.update_agent(name, session_id=body.get("session_id"), status=body.get("status", "running"))
+    sid = body.get("session_id")
+    a = db.get_agent(name)
+    changed = bool(a and sid and a.get("session_id") != sid)
+    db.update_agent(name, session_id=sid, status=body.get("status", "running"))
+    if changed and SUPERGROUP and a.get("topic_id"):
+        r = await tg.send_message(SUPERGROUP, f"📌 Сессия: {sid}", message_thread_id=a["topic_id"])
+        mid = (r.get("result") or {}).get("message_id") if r else None
+        if mid:
+            await tg.pin_message(SUPERGROUP, mid)
+            old = a.get("pin_msg_id")
+            if old and old != mid:
+                await tg.unpin_message(SUPERGROUP, old)
+            db.update_agent(name, pin_msg_id=mid)
     return {"ok": True}
 
 
