@@ -87,7 +87,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function injectChannel(text) {
-  const content = `📨 Сообщение от владельца:\n\n${text}`;
+  const content = `📨 Сообщение от владельца:\n\n${text}\n\n⚠️ Ответь владельцу ТОЛЬКО через инструмент send_message — твой текст в консоли он НЕ видит.`;
   try {
     await server.notification({ method: "notifications/claude/channel", params: { content, meta: { source: "fleet" } } });
     flog("injected channel notification");

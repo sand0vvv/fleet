@@ -181,9 +181,15 @@ def _unregister_project_mcp(project):
 def _spawn_cli(name, project, model, session_id=None):
     """Launch a visible interactive claude window (cli mode) with channel injection."""
     _register_project_mcp(project, name, "cli")
+    rule_path = os.path.join(project, ".fleet", "rule.txt")
+    pathlib.Path(os.path.join(project, ".fleet")).mkdir(parents=True, exist_ok=True)
+    with open(rule_path, "w", encoding="utf-8") as f:
+        f.write("Ты — агент флота. Владелец общается с тобой из Telegram и видит ТОЛЬКО сообщения, "
+                "отправленные инструментом send_message (файлы — send_file). Твой текст в этом "
+                "терминале владелец НЕ видит. ВСЕГДА отвечай владельцу через send_message.")
     chan = (["--dangerously-load-development-channels", "server:fleet"] if CHANNEL_MODE == "dev"
             else ["--channels", "server:fleet"])
-    parts = ["claude", *chan, "--dangerously-skip-permissions"]
+    parts = ["claude", *chan, "--dangerously-skip-permissions", "--append-system-prompt-file", rule_path]
     if session_id:
         parts += ["--resume", session_id]
     elif _list_sessions(project):
