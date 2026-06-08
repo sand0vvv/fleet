@@ -191,9 +191,10 @@ async def tg_update(req: Request):
 
     # General -> commands
     if not thread_id:
-        if text.startswith("/"):
-            log(f"command(General): {text}")
-            await handle_command(text)
+        cmdtext = _command_of(text)
+        if cmdtext:
+            log(f"command(General): {cmdtext}")
+            await handle_command(cmdtext)
         elif text.strip():
             log(f"coordinate(General): {text[:80]}")
             await cmd_coordinate(text)
@@ -216,6 +217,22 @@ async def tg_update(req: Request):
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
+KNOWN_COMMANDS = {"spawn", "list", "machines", "status", "kill", "restart", "mode", "model",
+                  "rename", "sessions", "use", "new", "stop", "compact", "usage", "help"}
+
+
+def _command_of(text):
+    """General-topic only: a message is a command if it starts with '/' OR its first word
+    is a known command (so commands are always commands, never sent to the coordinator)."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if t.startswith("/"):
+        return t
+    first = t.split()[0].split("@")[0].lower()
+    return "/" + t if first in KNOWN_COMMANDS else None
+
+
 async def handle_command(text, agent=None):
     parts = text.strip().split()
     cmd = parts[0].lstrip("/").split("@")[0].lower()  # strip @botusername in groups
