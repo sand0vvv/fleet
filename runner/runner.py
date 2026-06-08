@@ -270,19 +270,51 @@ async def run_claude(project, prompt, model, session_id, name):
     return last or "(пустой ответ)", session_id
 
 
+def _proj_dir(project):
+    # Claude Code encodes the cwd by replacing EVERY non-alphanumeric char with '-'
+    # (separators AND non-ASCII like cyrillic). Must match exactly.
+    enc = re.sub(r"[^a-zA-Z0-9]", "-", project or "")
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects", enc)
+
+
+def _session_tokens(project, session_id):
+    """Current context size of a session = input + cache_read + cache_creation of its last turn."""
+    if not session_id:
+        return None
+    p = os.path.join(_proj_dir(project), f"{session_id}.jsonl")
+    if not os.path.exists(p):
+        return None
+    last = None
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    u = (json.loads(line).get("message") or {}).get("usage")
+                    if u:
+                        last = u
+                except Exception:
+                    pass
+    except Exception:
+        return None
+    if not last:
+        return None
+    return (int(last.get("input_tokens", 0)) + int(last.get("cache_read_input_tokens", 0))
+            + int(last.get("cache_creation_input_tokens", 0)))
+
+
 def _list_sessions(project):
-    """List Claude Code sessions stored for this project dir (newest first)."""
-    enc = re.sub(r"[:\\/]", "-", project or "")
-    d = os.path.join(os.path.expanduser("~"), ".claude", "projects", enc)
+    """List Claude Code sessions for this project dir (newest first): (id, time, size_kb)."""
+    d = _proj_dir(project)
     if not os.path.isdir(d):
         return []
     out = []
     for f in os.listdir(d):
         if f.endswith(".jsonl"):
             p = os.path.join(d, f)
-            out.append((f[:-6], os.path.getmtime(p)))
+            out.append((f[:-6], os.path.getmtime(p), os.path.getsize(p)))
     out.sort(key=lambda x: x[1], reverse=True)
-    return [(sid, datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")) for sid, ts in out]
+    return [(sid, datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M"), sz // 1024)
+            for sid, ts, sz in out]
 
 
 def _usage_panel():
@@ -405,15 +437,19 @@ async def handle(cmd):
         if not sessions:
             await post(f"/agent/{name}/out", {"text": "сессий в этой папке не найдено"})
         else:
-            lines = [f"{i + 1}. {sid}  ({ts})" for i, (sid, ts) in enumerate(sessions[:15])]
+            lines = [f"{i + 1}. {sid}  ({ts}, {sz}KB)" for i, (sid, ts, sz) in enumerate(sessions[:15])]
             await post(f"/agent/{name}/out", {"text": "Сессии папки (новые сверху):\n" + "\n".join(lines)
                                               + "\n\nвыбрать: /use <agent> <id>"})
 
     elif t == "status":
         p = _cli_procs.get(name)
         alive = p is not None and p.poll() is None
-        txt = f"runner: cli-процесс {'жив, pid ' + str(p.pid) if alive else 'не запущен'}"
-        await post(f"/agent/{name}/out", {"text": txt})
+        parts = [f"cli-процесс {'жив, pid ' + str(p.pid) if alive else 'не запущен'}"]
+        tok = _session_tokens(project, cmd.get("session_id"))
+        if tok is not None:
+            warn = " — пора /compact" if tok > 150000 else ""
+            parts.append(f"контекст сессии ~{tok // 1000}k токенов{warn}")
+        await post(f"/agent/{name}/out", {"text": "runner: " + " · ".join(parts)})
 
     elif t == "coordinate":
         cmdline = await _coordinate(cmd.get("text", ""), cmd.get("agents", []), cmd.get("machines", []))

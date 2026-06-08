@@ -295,7 +295,8 @@ async def cmd_status(args):
     await reply(a["topic_id"], f"{a['name']}: {a['status']} · {a['mode']} · {a['model'] or 'default'} · "
                                f"session={a['session_id'] or '—'}")
     machine = _machine_of(a)
-    await manager.push(machine, {"type": "status", "agent": a["name"]})
+    await manager.push(machine, {"type": "status", "agent": a["name"],
+                                 "project_path": a["project_path"], "session_id": a["session_id"]})
 
 
 async def cmd_coordinate(text):
