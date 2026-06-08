@@ -388,7 +388,7 @@ async def _coordinate(text, agents, machines):
         "Выполни запрос и кратко отчитайся (финальный ответ уйдёт владельцу в Telegram)."
     )
     args = ["-p", "--output-format", "json", "--dangerously-skip-permissions",
-            "--mcp-config", cfgpath, "--model", "sonnet"]
+            "--mcp-config", cfgpath, "--model", "haiku"]
     raw, _rc, _err = await _exec(args, proj, spec)
     try:
         res = (json.loads(raw).get("result") or "").strip()
