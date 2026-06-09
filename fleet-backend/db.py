@@ -95,10 +95,28 @@ def delete_agent(name):
 # ---- messages ----
 def log_message(agent_id, direction, text, mtype="text", files=None, voice_text=None,
                 tg_message_id=None, reply_to=None):
-    q("""INSERT INTO fleet.messages
+    row = q("""INSERT INTO fleet.messages
             (agent_id, direction, text, type, files_path, voice_text, tg_message_id, reply_to, status)
-         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'ok')""",
-      (agent_id, direction, text, mtype, files, voice_text, tg_message_id, reply_to), fetch=None)
+         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'pending') RETURNING id""",
+            (agent_id, direction, text, mtype, files, voice_text, tg_message_id, reply_to), fetch="one")
+    return row["id"] if row else None
+
+
+# ── reliable delivery: per-agent cursor + replay (no loss, no dup) ──
+def ack_delivered(name, mid):
+    q("UPDATE fleet.agents SET last_delivered_id = GREATEST(last_delivered_id, %s) WHERE name=%s",
+      (int(mid), name), fetch=None)
+
+
+def undelivered(agent_id, cursor):
+    """Inbound messages newer than the cursor (for replay on reconnect)."""
+    return q("""SELECT id, text, type, files_path FROM fleet.messages
+                WHERE agent_id=%s AND direction='in' AND id > %s ORDER BY id""",
+             (agent_id, cursor or 0), fetch="all")
+
+
+def agents_on_machine(machine_id):
+    return q("SELECT * FROM fleet.agents WHERE machine_id=%s", (machine_id,), fetch="all")
 
 
 def get_message_by_tgid(tg_message_id):

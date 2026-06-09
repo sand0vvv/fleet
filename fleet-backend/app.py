@@ -62,18 +62,20 @@ async def push_stream(name, payload) -> bool:
         return False
 
 
-# ── debounce: collect a burst of messages per agent, deliver as one ──────────
+# ── debounce + reliable delivery (per-agent cursor; deliver carries `mid`) ──────
 DEBOUNCE_SECONDS = int(os.environ.get("DEBOUNCE_SECONDS", "15"))
-_pending = {}   # agent_name -> {"texts": [...], "files": [...]}
+_pending = {}   # agent_name -> {"texts": [...], "files": [...], "mid": int}
 _timers = {}    # agent_name -> asyncio.Task
 
 
-def _enqueue(name, text, files):
-    buf = _pending.setdefault(name, {"texts": [], "files": []})
+def _enqueue(name, text, files, mid):
+    buf = _pending.setdefault(name, {"texts": [], "files": [], "mid": 0})
     if text:
         buf["texts"].append(text)
     if files:
         buf["files"].extend(files)
+    if mid:
+        buf["mid"] = max(buf["mid"], mid)
     old = _timers.get(name)
     if old:
         old.cancel()
@@ -93,22 +95,43 @@ async def _flush_after(name):
     if not a:
         return
     text = "\n".join(t for t in buf["texts"] if t).strip()
-    files = buf["files"]
+    await _deliver(a, text, buf["files"], buf["mid"])
+
+
+async def _deliver(a, text, files, mid):
+    """Deliver to a cli stream or headless runner, carrying `mid` (for ack/dedup)."""
+    name = a["name"]
     if a["mode"] == "cli":
-        ok = await push_stream(name, {"type": "message", "text": text, "files": files})
-        log(f"flush(cli) -> agent={name} stream_ok={ok}")
+        ok = await push_stream(name, {"type": "message", "text": text, "files": files, "mid": mid})
+        log(f"deliver(cli) {name} mid={mid} ok={ok}")
         if not ok:
-            await reply(a["topic_id"], f"⚠️ cli-агент не на связи (окно закрыто?). /restart {name}")
+            await reply(a["topic_id"], f"⚠️ cli-агент не на связи. /restart {name}")
         return
     machine = _machine_of(a)
-    log(f"flush(headless) -> agent={name} machine={machine}")
     pushed = await manager.push(machine, {
-        "type": "deliver", "agent": a["name"], "mode": a["mode"], "model": a["model"],
+        "type": "deliver", "agent": name, "mode": a["mode"], "model": a["model"],
         "project_path": a["project_path"], "session_id": a["session_id"],
-        "text": text, "files": files,
+        "text": text, "files": files, "mid": mid,
     })
+    log(f"deliver(headless) {name} mid={mid} pushed={pushed}")
     if not pushed:
         await reply(a["topic_id"], "⚠️ машина агента оффлайн — runner не на связи")
+
+
+async def replay_agent(a):
+    """Re-deliver inbound messages newer than the agent's cursor (combined). Idempotent:
+    consumer dedups by `mid`, so re-delivery never produces duplicates."""
+    rows = db.undelivered(a["id"], a.get("last_delivered_id") or 0)
+    if not rows:
+        return
+    text = "\n".join(r["text"] for r in rows if r["text"]).strip()
+    files = []
+    for r in rows:
+        if r.get("files_path"):
+            files.extend(r["files_path"])
+    mid = rows[-1]["id"]
+    log(f"replay {a['name']}: {len(rows)} undelivered -> mid={mid}")
+    await _deliver(a, text or "(вложение)", files, mid)
 
 
 @app.get("/health")
@@ -180,12 +203,12 @@ async def tg_update(req: Request):
 
     agent = db.get_agent_by_topic(thread_id) if thread_id else None
 
-    # log inbound to DB (always; agent_id null for General)
+    # log inbound to DB (always; agent_id null for General) — capture id for delivery cursor
+    mid = None
     try:
-        db.log_message(agent["id"] if agent else None, "in", text, mtype,
-                       files or None, voice_text=(text if mtype == "voice" else None),
-                       tg_message_id=msg.get("message_id"), reply_to=reply_to_id)
-        log("inbound logged to db")
+        mid = db.log_message(agent["id"] if agent else None, "in", text, mtype,
+                             files or None, voice_text=(text if mtype == "voice" else None),
+                             tg_message_id=msg.get("message_id"), reply_to=reply_to_id)
     except Exception as e:
         log(f"log_message FAILED: {e}")
 
@@ -209,8 +232,8 @@ async def tg_update(req: Request):
         await handle_command(text, agent=agent)
         return {"ok": True}
 
-    log(f"enqueue -> agent={agent['name']} (debounce {DEBOUNCE_SECONDS}s)")
-    _enqueue(agent["name"], text, files)
+    log(f"enqueue -> agent={agent['name']} mid={mid} (debounce {DEBOUNCE_SECONDS}s)")
+    _enqueue(agent["name"], text, files, mid)
     return {"ok": True}
 
 
@@ -520,6 +543,16 @@ async def agent_inject(name: str, req: Request):
     return {"ok": True}
 
 
+@app.post("/agent/{name}/ack")
+async def agent_ack(name: str, req: Request):
+    """Consumer confirms it processed up to message id `mid` -> advance the delivery cursor."""
+    body = await req.json()
+    mid = body.get("mid")
+    if mid:
+        db.ack_delivered(name, mid)
+    return {"ok": True}
+
+
 @app.post("/agent/{name}/session")
 async def agent_session(name: str, req: Request):
     body = await req.json()
@@ -556,6 +589,11 @@ async def ws_runner(ws: WebSocket):
     db.upsert_machine(machine, token_hash=token)
     await manager.connect(machine, ws)
     log(f"runner connected: {machine}")
+    m = db.get_machine(machine)
+    if m:
+        for a in (db.agents_on_machine(m["id"]) or []):
+            if a["mode"] != "cli":   # cli agents replay via their own stream reconnect
+                await replay_agent(a)
     try:
         while True:
             data = await ws.receive_json()
@@ -580,6 +618,9 @@ async def agent_stream(ws: WebSocket, name: str):
             pass
     _streams[name] = ws
     log(f"stream connected: {name}")
+    a = db.get_agent(name)
+    if a:
+        await replay_agent(a)   # drain undelivered into the freshly-connected cli session
     try:
         while True:
             await ws.receive_text()  # keepalive; content ignored

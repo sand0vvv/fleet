@@ -46,6 +46,7 @@ _agent_locks = {}  # serialize claude runs per agent (one session at a time)
 _cli_procs = {}    # name -> Popen (cli-mode visible windows)
 _connected = False  # WS link to backend up?
 STATUS_PATH = os.path.join(os.path.dirname(__file__), ".fleet", "status.json")
+CURSOR_PATH = os.path.join(os.path.dirname(__file__), ".fleet", "cursor.json")  # per-agent high-water (dedup)
 
 # ── logging ──────────────────────────────────────────────────────────────────
 LOG_DIR = os.path.join(os.path.dirname(__file__), ".fleet", "logs")
@@ -96,6 +97,35 @@ async def post(path, payload):
             await c.post(f"{BACKEND_HTTP}{path}", json=payload, headers={"X-Fleet-Token": TOKEN})
     except Exception as e:
         log.error(f"POST {path} failed: {e}")
+
+
+# ── delivery dedup: persisted per-agent high-water (skip id <= seen, no duplicates) ──
+def _load_cursor():
+    try:
+        with open(CURSOR_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _hw(name):
+    return int(_load_cursor().get(name, 0))
+
+
+def _set_hw(name, mid):
+    pathlib.Path(os.path.dirname(CURSOR_PATH)).mkdir(parents=True, exist_ok=True)
+    c = _load_cursor()
+    c[name] = int(mid)
+    try:
+        with open(CURSOR_PATH, "w", encoding="utf-8") as f:
+            json.dump(c, f)
+    except Exception:
+        pass
+
+
+async def _ack(name, mid):
+    if mid:
+        await post(f"/agent/{name}/ack", {"mid": mid})
 
 
 async def download(url, dest_dir):
@@ -420,6 +450,10 @@ async def handle(cmd):
     elif t == "deliver":
         if cmd.get("mode") == "cli":
             return  # cli messages delivered via backend stream to fleet-mcp, not here
+        mid = cmd.get("mid") or 0
+        if mid and mid <= _hw(name):
+            await _ack(name, mid)   # already processed — just advance backend cursor (no duplicate)
+            return
         lock = _agent_locks.setdefault(name, asyncio.Lock())
         async with lock:
             note = ""
@@ -434,6 +468,9 @@ async def handle(cmd):
             result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"), name)
             await post(f"/agent/{name}/out", {"text": result})
             await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
+        if mid:
+            _set_hw(name, mid)
+            await _ack(name, mid)
 
     elif t == "compact":
         # slash commands don't run in -p, so do a "soft compact": summarize -> fresh session.

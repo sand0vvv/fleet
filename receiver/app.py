@@ -6,6 +6,7 @@ always returns 200 so Telegram never backs off.
 import os
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="fleet-receiver")
 BACKEND = os.environ.get("FLEET_BACKEND_URL", "").rstrip("/")
@@ -25,8 +26,12 @@ async def webhook(req: Request):
     body = await req.body()
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            await c.post(f"{BACKEND}/tg/update", content=body,
-                         headers={"content-type": "application/json", "x-fleet-token": FLEET_TOKEN})
+            r = await c.post(f"{BACKEND}/tg/update", content=body,
+                             headers={"content-type": "application/json", "x-fleet-token": FLEET_TOKEN})
+        # backend up but erroring -> let Telegram retry (durable inbound); 4xx = don't retry
+        if r.status_code >= 500:
+            return JSONResponse({"ok": False}, status_code=502)
     except Exception as e:
         print(f"[receiver] forward failed: {e}")
+        return JSONResponse({"ok": False}, status_code=502)  # backend unreachable -> Telegram retries
     return {"ok": True}

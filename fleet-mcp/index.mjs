@@ -31,6 +31,19 @@ function flog(...a) {
   console.error("[fleet-mcp]", ...a);
 }
 
+// ── delivery dedup: persisted high-water (skip mid <= seen) ──
+const CURSOR = join(LOGDIR, "cursor.json");
+function hw() { try { return JSON.parse(readFileSync(CURSOR, "utf-8")).hw || 0; } catch { return 0; } }
+function setHw(mid) { try { writeFileSync(CURSOR, JSON.stringify({ hw: mid })); } catch { /* ignore */ } }
+async function ack(mid) {
+  try {
+    await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/ack`, {
+      method: "POST", headers: { "content-type": "application/json", "x-fleet-token": TOKEN },
+      body: JSON.stringify({ mid }),
+    });
+  } catch { /* ignore */ }
+}
+
 const INSTRUCTIONS =
   "Ты — агент флота. Сообщения владельца приходят как channel-уведомления (📨). " +
   "Чтобы ответить владельцу — вызови инструмент `send_message`. Файлы — `send_file`. " +
@@ -133,6 +146,8 @@ function connectStream() {
     flog("stream msg:", data.toString().slice(0, 200));
     try {
       const msg = JSON.parse(data.toString());
+      const mid = msg.mid || 0;
+      if (mid && mid <= hw()) { await ack(mid); return; }  // already injected -> no duplicate
       let text = msg.text || "";
       if (msg.files && msg.files.length) {
         const paths = [];
@@ -143,6 +158,7 @@ function connectStream() {
         text += `\n[файлы получены: ${paths.join(", ")}]`;
       }
       if (text.trim()) injectChannel(text);
+      if (mid) { setHw(mid); await ack(mid); }
     } catch (e) { flog("bad stream frame:", e.message); }
   });
   ws.on("close", (c) => { flog("stream CLOSE", c, "-> reconnect 3s"); setTimeout(connectStream, 3000); });
