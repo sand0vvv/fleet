@@ -111,3 +111,23 @@ In an agent's topic: free text / voice / files → the agent. In General: free t
 ## Local run (machine with agents)
 
 `claude` installed & logged in; Node; Python. `runner/.env`: `FLEET_BACKEND_HTTP`, `FLEET_BACKEND_WS` (`wss://.../ws/runner`), `MACHINE_NAME`, `RUNNER_TOKEN`. Then `python runner/runner.py` (or `doctor` / `status`). `MACHINE_NAME` must match the `<machine>` in `/spawn`. Deploy details: `DEPLOY.md`.
+
+---
+
+## Recent subsystems (v0.6–v0.10) — read before touching delivery/coordinator
+
+### Reliable delivery (exactly-once) — the dedup is load-bearing
+- Every inbound message has a monotonic id (`fleet.messages.id`). Delivery to an agent carries `mid`.
+- Backend keeps `fleet.agents.last_delivered_id` (cursor). `replay_agent()` re-delivers only `id > cursor`, called on `ws_runner` connect (headless agents) and `agent_stream` connect (cli). `_deliver()` is the single delivery helper (cli stream vs headless runner), debounce calls it with the batch's max id.
+- `/agent/{name}/ack {mid}` advances the cursor. Consumers persist a high-water mark and SKIP `mid <= seen`: runner `.fleet/cursor.json` (`_hw/_set_hw/_ack`, ack AFTER the claude run), fleet-mcp `.fleet/cursor.json` (`hw/setHw/ack`, ack AFTER inject). → no loss (replay), no duplicates (id-dedup). Don't break this invariant: deliver must carry `mid`, consumer must dedup+ack.
+- receiver returns 502 on backend-down/5xx so Telegram retries the webhook (durable inbound); 4xx = no retry.
+
+### Coordinator = a REAL agent (not a translator)
+- General free-text → `cmd_coordinate` → runner `_coordinate`: runs a FULL headless claude (haiku), FRESH session each request (no --resume → context auto-resets), in `~/.fleet-coordinator`, with the fleet MCP in `FLEET_CONTROL=1` mode (extra tool `fleet_command`) + Bash/Write. It can mkdir/scaffold and manage the fleet, then its reply goes to General via `/coordinate_reply`. `fleet_command` POSTs `/fleet/command` → `handle_command`.
+- Command routing: in General a message is a command if it starts with `/` OR its first word is a known command (`_command_of`) — commands never reach the coordinator. In agent topics, only `/`-prefixed are commands (so normal chat isn't misread).
+
+### Other
+- `/agent/{name}/inject` — external services (tac-backend) push a message into a cli agent's live session (reuses `push_stream`; falls back to posting in the topic).
+- Session id pinned in the topic + stored in `fleet.agents` (`pin_msg_id`, migration 003); cli live session auto-detected (`_detect_cli_session`, newest `.jsonl`). `/status` reads session context tokens from the `.jsonl` (input+cache_read+cache_creation).
+- cli agents are HARD-instructed to reply via `send_message` (system-prompt rule `--append-system-prompt-file` + per-inject reminder) — console text is invisible to the owner.
+- Migrations now: 001 schema, 002 message links (reply_to), 003 pin, 004 delivery cursor.
