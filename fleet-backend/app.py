@@ -670,6 +670,14 @@ async def agent_notify(name: str, req: Request):
     return {"ok": True}
 
 
+@app.get("/agent/{name}/rooms")
+async def agent_rooms(name: str):
+    """Rooms this agent can speak in (so the agent knows its surfaces). For the say_in_room tool."""
+    return [{"room": r["name"], "kind": r["kind"],
+             "with": [m.get("agent") for m in (r["members"] or []) if m.get("agent") != name]}
+            for r in db.rooms_for_agent(name)]
+
+
 @app.post("/backend/post")
 async def backend_post(req: Request):
     """A backend pushes telemetry into its dedicated backend topic. Body: {room, text}."""

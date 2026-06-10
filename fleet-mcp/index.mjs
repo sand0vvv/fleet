@@ -45,8 +45,12 @@ async function ack(mid) {
 }
 
 const INSTRUCTIONS =
-  "Ты — агент флота. Сообщения владельца приходят как channel-уведомления (📨). " +
-  "Чтобы ответить владельцу — вызови инструмент `send_message`. Файлы — `send_file`. " +
+  "Ты — агент флота. Сообщения приходят как channel-уведомления (📨), часто с меткой источника " +
+  "вида `[📍 откуда · от кого]` — смотри её, чтобы понять, ОТКУДА сообщение и куда отвечать. " +
+  "У тебя ДВА вида поверхностей: (1) твой ЛИЧНЫЙ топик с владельцем — отвечай туда через `send_message`; " +
+  "(2) КОМНАТЫ — общие топики с другими агентами (напр. war-room с poly) — пиши туда через " +
+  "`say_in_room(room, text)` для координации с напарником. Узнать свои комнаты — `my_rooms`. " +
+  "Правило: владельцу в личке → send_message; напарнику в комнате → say_in_room. " +
   "Обычный текст в консоли владелец НЕ видит; видит только отправленное через эти тулзы.";
 
 const server = new Server(
@@ -69,6 +73,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { name: "send_file", description: "Отправить файл владельцу в Telegram. path — локальный путь.",
       inputSchema: { type: "object", properties: { path: { type: "string" }, caption: { type: "string" } }, required: ["path"] } },
+    { name: "say_in_room",
+      description: "Написать в КОМНАТУ — общий топик с другим агентом (напр. war-room). Так ты координируешься с напарником (напр. poly), и это видно владельцу. Для ответа ВЛАДЕЛЬЦУ в своём личном топике — обычный send_message. room = название комнаты (узнать через my_rooms).",
+      inputSchema: { type: "object", properties: { room: { type: "string" }, text: { type: "string" } }, required: ["room", "text"] } },
+    { name: "my_rooms",
+      description: "Узнать, в каких КОМНАТАХ (общих топиках) ты состоишь и с кем — чтобы понимать, где можешь координироваться помимо личного топика.",
+      inputSchema: { type: "object", properties: {} } },
   ];
   if (CONTROL) {
     tools.push({
@@ -101,6 +111,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         { method: "POST", headers: { "x-fleet-token": TOKEN }, body: fd });
       flog("send_file ok", args.path);
       return { content: [{ type: "text", text: "sent" }] };
+    }
+    if (name === "say_in_room") {
+      const r = await fetch(`${BACKEND}/room/say`, {
+        method: "POST", headers: { "content-type": "application/json", "x-fleet-token": TOKEN },
+        body: JSON.stringify({ from: AGENT, room: args.room, text: args.text }),
+      });
+      const j = await r.json().catch(() => ({}));
+      flog("say_in_room", args.room, j.ok);
+      return { content: [{ type: "text", text: j.ok ? `отправлено в комнату ${args.room}` : `ошибка: ${j.error || "не вышло"}` }] };
+    }
+    if (name === "my_rooms") {
+      const r = await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/rooms`, { headers: { "x-fleet-token": TOKEN } });
+      const j = await r.json().catch(() => []);
+      flog("my_rooms", JSON.stringify(j).slice(0, 120));
+      return { content: [{ type: "text", text: JSON.stringify(j) }] };
     }
     if (name === "fleet_command" && CONTROL) {
       await fetch(`${BACKEND}/fleet/command`, {

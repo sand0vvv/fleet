@@ -105,6 +105,12 @@ def list_rooms():
     return q("SELECT topic_id, name, kind, members FROM fleet.rooms ORDER BY created_at")
 
 
+def rooms_for_agent(name):
+    """Rooms this agent is a member of (so it knows where it can speak)."""
+    return q("SELECT topic_id, name, kind, members FROM fleet.rooms WHERE members @> %s ORDER BY name",
+             (Json([{"agent": name}]),), fetch="all") or []
+
+
 def create_room(topic_id, name, members, kind="pair", backend_url=None):
     return q("""INSERT INTO fleet.rooms (topic_id, name, kind, members, backend_url)
                 VALUES (%s,%s,%s,%s,%s)
