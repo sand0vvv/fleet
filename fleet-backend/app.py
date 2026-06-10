@@ -543,6 +543,24 @@ async def agent_inject(name: str, req: Request):
     return {"ok": True}
 
 
+@app.post("/warroom/say")
+async def warroom_say(req: Request):
+    """A linked agent (Docker/poly) speaks INTO another agent's topic under its own bot identity
+    (@hud113) AND the text is injected into that agent's live session. So the owner sees a distinct
+    sender (war-room), and the target agent receives it. Body: {to, text}."""
+    body = await req.json()
+    to = body.get("to", "tac-trader")
+    text = body.get("text", "")
+    a = db.get_agent(to)
+    if config.DOCKER_API and a and a.get("topic_id") and SUPERGROUP:
+        await tg.send_message_as(config.DOCKER_API, SUPERGROUP, text, message_thread_id=a["topic_id"])
+        log(f"warroom say -> {to} (as Docker): {text[:60]!r}")
+    else:
+        log(f"warroom say -> {to}: DOCKER_API set={bool(config.DOCKER_API)} topic={a.get('topic_id') if a else None}")
+    await push_stream(to, {"type": "message", "text": text})
+    return {"ok": True}
+
+
 @app.post("/agent/{name}/ack")
 async def agent_ack(name: str, req: Request):
     """Consumer confirms it processed up to message id `mid` -> advance the delivery cursor."""

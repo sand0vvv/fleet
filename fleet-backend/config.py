@@ -16,3 +16,9 @@ PORT = int(os.environ.get("PORT", "8000"))
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TG_FILE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
+
+# Docker (@hud113) — the architect/poly agent's OWN bot identity in the war-room (tac-trader topic),
+# so the owner visually distinguishes its messages from tac-trader's. Token env name is flexible.
+DOCKER_BOT_TOKEN = (os.environ.get("DOCKER_BOT_TOKEN") or os.environ.get("AGENTCUP_BOT_TOKEN")
+                    or os.environ.get("AGENT_DOCKER_BOT_TOKEN") or os.environ.get("HUD113_BOT_TOKEN") or "")
+DOCKER_API = f"https://api.telegram.org/bot{DOCKER_BOT_TOKEN}" if DOCKER_BOT_TOKEN else ""

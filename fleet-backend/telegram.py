@@ -20,6 +20,20 @@ async def send_message(chat_id, text, message_thread_id=None, reply_to=None):
     return last
 
 
+async def send_message_as(api_base, chat_id, text, message_thread_id=None):
+    """Send a message through a SPECIFIC bot token (api_base = https://api.telegram.org/bot<token>).
+    Used for the Docker (@hud113) identity in the war-room so the owner sees a distinct sender."""
+    chunks = [text[i:i + 4000] for i in range(0, len(text or " "), 4000)] or [" "]
+    last = None
+    async with httpx.AsyncClient(timeout=30) as c:
+        for ch in chunks:
+            r = await c.post(f"{api_base}/sendMessage",
+                             json={k: v for k, v in {"chat_id": chat_id, "text": ch,
+                                                     "message_thread_id": message_thread_id}.items() if v is not None})
+            last = r.json()
+    return last
+
+
 async def send_document(chat_id, file_path, caption=None, message_thread_id=None, filename=None):
     async with httpx.AsyncClient(timeout=120) as c:
         with open(file_path, "rb") as f:
