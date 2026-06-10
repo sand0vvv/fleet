@@ -62,6 +62,33 @@ async def push_stream(name, payload) -> bool:
         return False
 
 
+# ── war-room: the tac-trader topic is shared by Albert (tac-trader, @hud112_bot) and
+#    Docker (the poly agent, @hud113_bot). Owner tags @hud112_bot/@hud113_bot to target one;
+#    no tag -> both. Albert's messages that address Docker are relayed into poly's session. ──
+WARROOM_TOPIC_AGENT = "tac-trader"
+WARROOM_PEER = "poly"
+
+
+def _warroom_targets(text):
+    t = (text or "").lower()
+    docker = "@hud113" in t or "@docker" in t
+    tac = "@hud112" in t or "@tac" in t or "@albert" in t
+    if not docker and not tac:
+        return {"tac-trader", "poly"}
+    s = set()
+    if docker:
+        s.add("poly")
+    if tac:
+        s.add("tac-trader")
+    return s
+
+
+def _addresses_docker(text):
+    t = (text or "").lower()
+    return ("@hud113" in t or "@docker" in t or "docker" in t
+            or t.startswith("poly") or "поли" in t)
+
+
 # ── debounce + reliable delivery (per-agent cursor; deliver carries `mid`) ──────
 DEBOUNCE_SECONDS = int(os.environ.get("DEBOUNCE_SECONDS", "15"))
 _pending = {}   # agent_name -> {"texts": [...], "files": [...], "mid": int}
@@ -230,6 +257,16 @@ async def tg_update(req: Request):
     if text.startswith("/"):
         log(f"command(topic {agent['name']}): {text}")
         await handle_command(text, agent=agent)
+        return {"ok": True}
+
+    # war-room: the tac-trader topic is shared by Albert + Docker(poly) — route by @-tags
+    if agent["name"] == WARROOM_TOPIC_AGENT:
+        targets = _warroom_targets(text)
+        log(f"warroom owner msg -> {targets}")
+        if WARROOM_PEER in targets:
+            await push_stream(WARROOM_PEER, {"type": "message", "text": f"👤 [владелец в war-room]\n{text}"})
+        if WARROOM_TOPIC_AGENT in targets:
+            _enqueue(agent["name"], text, files, mid)
         return {"ok": True}
 
     log(f"enqueue -> agent={agent['name']} mid={mid} (debounce {DEBOUNCE_SECONDS}s)")
@@ -468,6 +505,11 @@ async def agent_out(name: str, req: Request):
         r = await tg.send_message(SUPERGROUP, text, message_thread_id=a["topic_id"])
         tgid = (r.get("result") or {}).get("message_id") if r else None
         db.log_message(a["id"], "out", text, tg_message_id=tgid)
+        # war-room: relay Albert's message into Docker's (poly) session when it addresses Docker
+        if name == WARROOM_TOPIC_AGENT and _addresses_docker(text):
+            await push_stream(WARROOM_PEER, {"type": "message",
+                              "text": f"🦅 [tac-trader → Docker в war-room]\n{text}"})
+            log(f"warroom relay tac-trader -> {WARROOM_PEER}")
     return {"ok": True}
 
 
