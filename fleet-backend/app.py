@@ -552,13 +552,16 @@ async def warroom_say(req: Request):
     to = body.get("to", "tac-trader")
     text = body.get("text", "")
     a = db.get_agent(to)
+    docker_posted = False
     if config.DOCKER_API and a and a.get("topic_id") and SUPERGROUP:
-        await tg.send_message_as(config.DOCKER_API, SUPERGROUP, text, message_thread_id=a["topic_id"])
-        log(f"warroom say -> {to} (as Docker): {text[:60]!r}")
+        r = await tg.send_message_as(config.DOCKER_API, SUPERGROUP, text, message_thread_id=a["topic_id"])
+        docker_posted = bool(r and r.get("ok"))
+        log(f"warroom say -> {to} (as Docker, posted={docker_posted}): {text[:60]!r}")
     else:
         log(f"warroom say -> {to}: DOCKER_API set={bool(config.DOCKER_API)} topic={a.get('topic_id') if a else None}")
-    await push_stream(to, {"type": "message", "text": text})
-    return {"ok": True}
+    injected = await push_stream(to, {"type": "message", "text": text})
+    return {"ok": True, "docker_posted": docker_posted, "injected": injected,
+            "docker_token_set": bool(config.DOCKER_API)}
 
 
 @app.post("/agent/{name}/ack")
