@@ -92,7 +92,7 @@ async def _handle_backend_topic(topic_id, room, text):
     t = (text or "").strip()
     if not t:
         return
-    cmd = t.lstrip("/").split()[0].lower()
+    cmd = t.lstrip("/").split()[0].split("@")[0].lower()   # strip @botname suffix (group commands)
     path = BACKEND_CMD_MAP.get(cmd)
     if path and room.get("backend_url"):
         result = await _fetch_backend(room["backend_url"], path)
