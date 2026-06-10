@@ -276,7 +276,7 @@ async def tg_update(req: Request):
         log(f"room '{room.get('name')}' -> {[m.get('agent') for m in targets]}")
         for m in targets:
             db.set_reply_target(m["agent"], thread_id, m.get("bot"))   # reply-follows-origin
-            _enqueue(m["agent"], text, files, mid)
+            _enqueue(m["agent"], f"[📍 {room.get('name')} · от владельца] {text}", files, mid)
         return {"ok": True}
 
     if not agent:
@@ -574,7 +574,7 @@ async def agent_out(name: str, req: Request):
         for m in (room.get("members") or []):
             if m.get("agent") != name:
                 db.set_reply_target(m["agent"], topic, m.get("bot"))
-                _enqueue(m["agent"], f"[{name}]: {text}", [], None)
+                _enqueue(m["agent"], f"[📍 {room.get('name')} · от {name}] {text}", [], None)
     return {"ok": True}
 
 
@@ -692,14 +692,15 @@ async def room_say(req: Request):
     topic = room["topic_id"]
     if SUPERGROUP:
         await tg.send_message_as(config.bot_api(member.get("bot")), SUPERGROUP, text, message_thread_id=topic)
-    db.set_reply_target(frm, topic, member.get("bot"))     # this agent now replies into the room
+    # NOTE: do NOT set the SENDER's reply_target here — the sender is INITIATING, not being addressed.
+    # (That was the bug: poly /room/say to the war-room stuck poly's reply_target -> owner replies leaked.)
     a = db.get_agent(frm)
     if a:
         db.log_message(a["id"], "out", text)
     for m in (room.get("members") or []):
         if m.get("agent") != frm:
-            db.set_reply_target(m["agent"], topic, m.get("bot"))
-            _enqueue(m["agent"], f"[{frm}]: {text}", [], None)
+            db.set_reply_target(m["agent"], topic, m.get("bot"))   # recipient replies back into the room
+            _enqueue(m["agent"], f"[📍 {room.get('name')} · от {frm}] {text}", [], None)
     return {"ok": True, "room": room.get("name"), "topic": topic}
 
 
