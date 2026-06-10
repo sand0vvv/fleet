@@ -70,6 +70,10 @@ async def push_stream(name, payload) -> bool:
 # ── rooms: a reusable topic linking 2+ agents, each speaking via its own bot. Owner tags
 #    @<bot> to target one member, no tag -> all. Reply-follows-origin (an agent replies into
 #    the topic it was last addressed in). Folder-bound topics (not in fleet.rooms) are untouched. ──
+ARCHITECT = "poly"   # the architect agent talks to the owner in its OWN topic (send_message) and to
+#                      rooms explicitly via /room/say — so its owner-channel never gets stuck on a room.
+
+
 def _room_targets(text, members):
     """Which room members an owner message targets: @<bot> tags pick those; no tag -> all."""
     t = (text or "").lower()
@@ -275,7 +279,8 @@ async def tg_update(req: Request):
         targets = _room_targets(text, room.get("members") or [])
         log(f"room '{room.get('name')}' -> {[m.get('agent') for m in targets]}")
         for m in targets:
-            db.set_reply_target(m["agent"], thread_id, m.get("bot"))   # reply-follows-origin
+            if m.get("agent") != ARCHITECT:        # poly keeps its own owner-channel; replies to rooms via /room/say
+                db.set_reply_target(m["agent"], thread_id, m.get("bot"))
             _enqueue(m["agent"], f"[📍 {room.get('name')} · от владельца] {text}", files, mid)
         return {"ok": True}
 
@@ -573,7 +578,8 @@ async def agent_out(name: str, req: Request):
     if room:
         for m in (room.get("members") or []):
             if m.get("agent") != name:
-                db.set_reply_target(m["agent"], topic, m.get("bot"))
+                if m.get("agent") != ARCHITECT:    # poly receives the message but replies via /room/say
+                    db.set_reply_target(m["agent"], topic, m.get("bot"))
                 _enqueue(m["agent"], f"[📍 {room.get('name')} · от {name}] {text}", [], None)
     return {"ok": True}
 
