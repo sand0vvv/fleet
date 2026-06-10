@@ -22,3 +22,11 @@ TG_FILE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
 DOCKER_BOT_TOKEN = (os.environ.get("DOCKER_BOT_TOKEN") or os.environ.get("AGENTCUP_BOT_TOKEN")
                     or os.environ.get("AGENT_DOCKER_BOT_TOKEN") or os.environ.get("HUD113_BOT_TOKEN") or "")
 DOCKER_API = f"https://api.telegram.org/bot{DOCKER_BOT_TOKEN}" if DOCKER_BOT_TOKEN else ""
+
+# Bot identities for rooms: bot_key -> token. @hud112 = main bot, @hud113 = Docker.
+BOT_TOKENS = {"hud112": TELEGRAM_BOT_TOKEN, "hud113": DOCKER_BOT_TOKEN}
+
+
+def bot_api(bot_key):
+    """API base for a room member's bot (falls back to the main bot)."""
+    return f"https://api.telegram.org/bot{BOT_TOKENS.get(bot_key) or TELEGRAM_BOT_TOKEN}"

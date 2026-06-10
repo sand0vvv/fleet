@@ -3,7 +3,7 @@
 Single-user scale → a fresh connection per call is fine (Supabase pooler handles it).
 """
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 from config import DATABASE_URL
 
 
@@ -90,6 +90,34 @@ def delete_agent(name):
     if a:
         q("DELETE FROM fleet.messages WHERE agent_id=%s", (a["id"],), fetch=None)
     q("DELETE FROM fleet.agents WHERE name=%s", (name,), fetch=None)
+
+
+# ---- rooms (reusable multi-agent topics; reply-follows-origin) ----
+def get_room(topic_id):
+    return q("SELECT * FROM fleet.rooms WHERE topic_id=%s", (topic_id,), fetch="one")
+
+
+def get_room_by_name(name):
+    return q("SELECT * FROM fleet.rooms WHERE name=%s ORDER BY topic_id DESC LIMIT 1", (name,), fetch="one")
+
+
+def list_rooms():
+    return q("SELECT topic_id, name, kind, members FROM fleet.rooms ORDER BY created_at")
+
+
+def create_room(topic_id, name, members, kind="pair", backend_url=None):
+    return q("""INSERT INTO fleet.rooms (topic_id, name, kind, members, backend_url)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (topic_id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind,
+                    members=EXCLUDED.members, backend_url=EXCLUDED.backend_url
+                RETURNING *""",
+             (topic_id, name, kind, Json(members), backend_url), fetch="one")
+
+
+def set_reply_target(name, topic_id, bot):
+    """reply-follows-origin: the agent now replies into this topic via this bot."""
+    q("UPDATE fleet.agents SET reply_topic=%s, reply_bot=%s WHERE name=%s",
+      (topic_id, bot, name), fetch=None)
 
 
 # ---- messages ----

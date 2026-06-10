@@ -62,31 +62,14 @@ async def push_stream(name, payload) -> bool:
         return False
 
 
-# ── war-room: the tac-trader topic is shared by Albert (tac-trader, @hud112_bot) and
-#    Docker (the poly agent, @hud113_bot). Owner tags @hud112_bot/@hud113_bot to target one;
-#    no tag -> both. Albert's messages that address Docker are relayed into poly's session. ──
-WARROOM_TOPIC_AGENT = "tac-trader"
-WARROOM_PEER = "poly"
-
-
-def _warroom_targets(text):
+# ── rooms: a reusable topic linking 2+ agents, each speaking via its own bot. Owner tags
+#    @<bot> to target one member, no tag -> all. Reply-follows-origin (an agent replies into
+#    the topic it was last addressed in). Folder-bound topics (not in fleet.rooms) are untouched. ──
+def _room_targets(text, members):
+    """Which room members an owner message targets: @<bot> tags pick those; no tag -> all."""
     t = (text or "").lower()
-    docker = "@hud113" in t or "@docker" in t
-    tac = "@hud112" in t or "@tac" in t or "@albert" in t
-    if not docker and not tac:
-        return {"tac-trader", "poly"}
-    s = set()
-    if docker:
-        s.add("poly")
-    if tac:
-        s.add("tac-trader")
-    return s
-
-
-def _addresses_docker(text):
-    t = (text or "").lower()
-    return ("@hud113" in t or "@docker" in t or "docker" in t
-            or t.startswith("poly") or "поли" in t)
+    tagged = [m for m in members if m.get("bot") and f"@{m['bot']}" in t]
+    return tagged if tagged else list(members)
 
 
 # ── debounce + reliable delivery (per-agent cursor; deliver carries `mid`) ──────
@@ -250,6 +233,19 @@ async def tg_update(req: Request):
             await cmd_coordinate(text)
         return {"ok": True}
 
+    # room topic? (reusable multi-agent; reply-follows-origin). Folder topics fall through unchanged.
+    room = db.get_room(thread_id)
+    if room and room.get("kind") == "pair":
+        if text.startswith("/"):
+            await handle_command(text)
+            return {"ok": True}
+        targets = _room_targets(text, room.get("members") or [])
+        log(f"room '{room.get('name')}' -> {[m.get('agent') for m in targets]}")
+        for m in targets:
+            db.set_reply_target(m["agent"], thread_id, m.get("bot"))   # reply-follows-origin
+            _enqueue(m["agent"], text, files, mid)
+        return {"ok": True}
+
     if not agent:
         log(f"no agent bound to topic {thread_id}")
         return {"ok": True}
@@ -259,16 +255,8 @@ async def tg_update(req: Request):
         await handle_command(text, agent=agent)
         return {"ok": True}
 
-    # war-room: the tac-trader topic is shared by Albert + Docker(poly) — route by @-tags
-    if agent["name"] == WARROOM_TOPIC_AGENT:
-        targets = _warroom_targets(text)
-        log(f"warroom owner msg -> {targets}")
-        if WARROOM_PEER in targets:
-            await push_stream(WARROOM_PEER, {"type": "message", "text": f"👤 [владелец в war-room]\n{text}"})
-        if WARROOM_TOPIC_AGENT in targets:
-            _enqueue(agent["name"], text, files, mid)
-        return {"ok": True}
-
+    # folder topic (1:1): reply-follows-origin -> reset this agent back to its own topic + main bot
+    db.set_reply_target(agent["name"], agent["topic_id"], None)
     log(f"enqueue -> agent={agent['name']} mid={mid} (debounce {DEBOUNCE_SECONDS}s)")
     _enqueue(agent["name"], text, files, mid)
     return {"ok": True}
@@ -278,7 +266,7 @@ async def tg_update(req: Request):
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
 KNOWN_COMMANDS = {"spawn", "list", "machines", "status", "kill", "restart", "mode", "model",
-                  "rename", "sessions", "use", "new", "stop", "compact", "usage", "help"}
+                  "rename", "sessions", "use", "new", "stop", "compact", "usage", "help", "create"}
 
 
 def _command_of(text):
@@ -324,8 +312,29 @@ async def handle_command(text, agent=None):
         await cmd_set(args, "model")
     elif cmd == "rename":
         await cmd_rename(args, agent)
+    elif cmd == "create":
+        await cmd_create(args)
     else:
         await reply(None, f"неизвестная команда: /{cmd}")
+
+
+async def cmd_create(args):
+    """/create <name> <agent1> <agent2> — make a room topic where the two agents talk,
+    agent1 via @hud112, agent2 via @hud113. Owner tags @hud112_bot/@hud113_bot or no tag -> both."""
+    if len(args) < 3:
+        return await reply(None, "usage: /create <название> <агент1> <агент2>")
+    name, a1, a2 = args[0], args[1], args[2]
+    for an in (a1, a2):
+        if not db.get_agent(an):
+            return await reply(None, f"нет агента «{an}» (сначала /spawn его)")
+    topic_id = await tg.create_forum_topic(SUPERGROUP, name)
+    if not topic_id:
+        return await reply(None, "не смог создать топик")
+    members = [{"agent": a1, "bot": "hud112"}, {"agent": a2, "bot": "hud113"}]
+    db.create_room(topic_id, name, members)
+    await reply(topic_id, f"🏗🦅 Комната «{name}». {a1} → @hud112_bot · {a2} → @hud113_bot.\n"
+                          f"Тегай @hud112_bot / @hud113_bot чтобы адресовать одному, без тега — обоим.")
+    await reply(None, f"✅ комната «{name}» создана (topic {topic_id})")
 
 
 async def cmd_spawn(args):
@@ -493,23 +502,29 @@ def _help_text():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.post("/agent/{name}/out")
 async def agent_out(name: str, req: Request):
-    """Text reply from an agent -> its Telegram topic."""
+    """Agent reply -> reply-follows-origin: posts to the topic it was last addressed in, via that
+    topic's bot. Default = its own folder topic via the main bot (unchanged for plain agents)."""
     body = await req.json()
     a = db.get_agent(name)
     if not a or not SUPERGROUP:
         log(f"agent_out: no agent '{name}' or no supergroup")
         return {"ok": False}
     text = body.get("text", "")
-    log(f"agent_out {name}: text={text[:80]!r}")
-    if text:
-        r = await tg.send_message(SUPERGROUP, text, message_thread_id=a["topic_id"])
-        tgid = (r.get("result") or {}).get("message_id") if r else None
-        db.log_message(a["id"], "out", text, tg_message_id=tgid)
-        # war-room: relay Albert's message into Docker's (poly) session when it addresses Docker
-        if name == WARROOM_TOPIC_AGENT and _addresses_docker(text):
-            await push_stream(WARROOM_PEER, {"type": "message",
-                              "text": f"🦅 [tac-trader → Docker в war-room]\n{text}"})
-            log(f"warroom relay tac-trader -> {WARROOM_PEER}")
+    if not text:
+        return {"ok": True}
+    topic = a.get("reply_topic") or a["topic_id"]          # reply-follows-origin
+    api = config.bot_api(a.get("reply_bot")) if a.get("reply_bot") else config.TG_API
+    log(f"agent_out {name} -> topic {topic} bot {a.get('reply_bot') or 'main'}: {text[:70]!r}")
+    r = await tg.send_message_as(api, SUPERGROUP, text, message_thread_id=topic)
+    tgid = (r.get("result") or {}).get("message_id") if r else None
+    db.log_message(a["id"], "out", text, tg_message_id=tgid)
+    # if the agent spoke INTO a room, deliver to the other members so they see it (and reply there)
+    room = db.get_room(topic)
+    if room:
+        for m in (room.get("members") or []):
+            if m.get("agent") != name:
+                db.set_reply_target(m["agent"], topic, m.get("bot"))
+                _enqueue(m["agent"], f"[{name}]: {text}", [], None)
     return {"ok": True}
 
 
@@ -585,27 +600,31 @@ async def agent_inject(name: str, req: Request):
     return {"ok": True}
 
 
-@app.post("/warroom/say")
-async def warroom_say(req: Request):
-    """A linked agent (Docker/poly) speaks INTO another agent's topic under its own bot identity
-    (@hud113) AND the text is injected into that agent's live session. So the owner sees a distinct
-    sender (war-room), and the target agent receives it. Body: {to, text}."""
+@app.post("/room/say")
+async def room_say(req: Request):
+    """An agent proactively speaks INTO a room it belongs to (e.g. poly initiating in the war-room).
+    Posts via that member's bot, sets reply-targets, delivers to other members. Body: {from, room, text}."""
     body = await req.json()
-    to = body.get("to", "tac-trader")
-    text = body.get("text", "")
-    a = db.get_agent(to)
-    docker_posted, docker_err = False, None
-    if config.DOCKER_API and a and a.get("topic_id") and SUPERGROUP:
-        r = await tg.send_message_as(config.DOCKER_API, SUPERGROUP, text, message_thread_id=a["topic_id"])
-        docker_posted = bool(r and r.get("ok"))
-        if not docker_posted:
-            docker_err = f"{(r or {}).get('error_code')}: {(r or {}).get('description')}"
-        log(f"warroom say -> {to} (as Docker, posted={docker_posted}, err={docker_err}): {text[:60]!r}")
-    else:
-        log(f"warroom say -> {to}: DOCKER_API set={bool(config.DOCKER_API)} topic={a.get('topic_id') if a else None}")
-    injected = await push_stream(to, {"type": "message", "text": text})
-    return {"ok": True, "docker_posted": docker_posted, "docker_err": docker_err,
-            "injected": injected, "docker_token_set": bool(config.DOCKER_API)}
+    frm, text, room_ref = body.get("from", ""), body.get("text", ""), body.get("room")
+    room = (db.get_room(int(room_ref)) if str(room_ref).lstrip("-").isdigit()
+            else db.get_room_by_name(room_ref))
+    if not room:
+        return {"ok": False, "error": "room not found"}
+    member = next((m for m in (room.get("members") or []) if m.get("agent") == frm), None)
+    if not member:
+        return {"ok": False, "error": f"{frm} not a member"}
+    topic = room["topic_id"]
+    if SUPERGROUP:
+        await tg.send_message_as(config.bot_api(member.get("bot")), SUPERGROUP, text, message_thread_id=topic)
+    db.set_reply_target(frm, topic, member.get("bot"))     # this agent now replies into the room
+    a = db.get_agent(frm)
+    if a:
+        db.log_message(a["id"], "out", text)
+    for m in (room.get("members") or []):
+        if m.get("agent") != frm:
+            db.set_reply_target(m["agent"], topic, m.get("bot"))
+            _enqueue(m["agent"], f"[{frm}]: {text}", [], None)
+    return {"ok": True, "room": room.get("name"), "topic": topic}
 
 
 @app.post("/agent/{name}/ack")
