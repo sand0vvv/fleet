@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import json
+import time
 import asyncio
 import pathlib
 import argparse
@@ -44,6 +45,8 @@ CHANNEL_MODE = os.environ.get("FLEET_CHANNEL_MODE", "dev")
 
 _agent_locks = {}  # serialize claude runs per agent (one session at a time)
 _cli_procs = {}    # name -> Popen (cli-mode visible windows)
+_cli_meta = {}     # name -> {"project":..., "model":...} (for watchdog auto-restart)
+_restart_times = {}  # name -> [recent auto-restart epochs] (crash-loop guard)
 _connected = False  # WS link to backend up?
 STATUS_PATH = os.path.join(os.path.dirname(__file__), ".fleet", "status.json")
 CURSOR_PATH = os.path.join(os.path.dirname(__file__), ".fleet", "cursor.json")  # per-agent high-water (dedup)
@@ -238,6 +241,7 @@ def _spawn_cli(name, project, model, session_id=None):
     else:
         proc = subprocess.Popen(parts, cwd=project)
     _cli_procs[name] = proc
+    _cli_meta[name] = {"project": project, "model": model}   # remember for watchdog auto-restart
     log.info(f"cli spawned {name} pid={proc.pid}")
     # The dev-channels safety prompt can't be disabled via flags/settings, so auto-press
     # Enter (confirms option 1) ~3s after the window opens, while it still has focus.
@@ -569,13 +573,33 @@ def _write_status():
 
 
 async def monitor():
-    """Watchdog: detect crashed cli windows, notify owner, keep status.json fresh."""
+    """Watchdog: a crashed cli window is AUTO-RESTARTED (old already closed -> open a fresh one),
+    with a crash-loop guard so a window that dies on launch doesn't respawn forever."""
     while True:
         for n, p in list(_cli_procs.items()):
-            if p.poll() is not None:
-                log.info(f"cli window for {n} exited (code {p.returncode})")
-                _cli_procs.pop(n, None)
-                await post(f"/agent/{n}/notify", {"text": f"⚠️ cli-окно агента «{n}» закрылось. /restart {n} чтобы поднять."})
+            if p.poll() is None:
+                continue
+            log.info(f"cli window for {n} exited (code {p.returncode})")
+            _cli_procs.pop(n, None)
+            meta = _cli_meta.get(n)
+            now = time.time()
+            times = [t for t in _restart_times.get(n, []) if now - t < 300]
+            if not meta:
+                await post(f"/agent/{n}/notify", {"text": f"⚠️ cli «{n}» закрылось. /restart {n} чтобы поднять."})
+            elif len(times) >= 3:
+                _restart_times[n] = times
+                await post(f"/agent/{n}/notify",
+                           {"text": f"🛑 «{n}» крашится в цикле ({len(times)}× за 5 мин) — авто-рестарт остановлен. Разберись, потом /restart {n}."})
+            else:
+                try:
+                    pid = _spawn_cli(n, meta["project"], meta.get("model"))
+                    asyncio.create_task(_detect_cli_session(n, meta["project"]))
+                    times.append(now)
+                    _restart_times[n] = times
+                    await post(f"/agent/{n}/notify",
+                               {"text": f"♻️ watchdog: «{n}» упал → старое окно закрыто, новое поднято (pid {pid})."})
+                except Exception as e:
+                    await post(f"/agent/{n}/notify", {"text": f"⚠️ watchdog: авто-рестарт «{n}» не удался: {e}. /restart {n} вручную."})
         _write_status()
         await asyncio.sleep(15)
 
