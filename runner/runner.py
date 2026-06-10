@@ -440,12 +440,12 @@ async def handle(cmd):
             try:
                 pid = _spawn_cli(name, project, cmd.get("model"))
                 asyncio.create_task(_detect_cli_session(name, project))
-                await post(f"/agent/{name}/out", {"text": f"🟢 {name} (cli) — окно открыто, pid {pid}"})
+                await post(f"/agent/{name}/notify", {"text": f"🟢 {name} (cli) — окно открыто, pid {pid}"})
             except Exception as e:
                 log.error(f"cli spawn failed: {e}")
-                await post(f"/agent/{name}/out", {"text": f"cli spawn ошибка: {e}"})
+                await post(f"/agent/{name}/notify", {"text": f"cli spawn ошибка: {e}"})
         else:
-            await post(f"/agent/{name}/out", {"text": f"🟢 {name} на связи (headless)"})
+            await post(f"/agent/{name}/notify", {"text": f"🟢 {name} на связи (headless)"})
 
     elif t == "deliver":
         if cmd.get("mode") == "cli":
@@ -466,7 +466,7 @@ async def handle(cmd):
             prompt = (note + (cmd.get("text") or "")).strip() or "(пусто)"
             await post(f"/agent/{name}/session", {"session_id": cmd.get("session_id"), "status": "running"})
             result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"), name)
-            await post(f"/agent/{name}/out", {"text": result})
+            await post(f"/agent/{name}/notify", {"text": result})
             await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
         if mid:
             _set_hw(name, mid)
@@ -477,11 +477,11 @@ async def handle(cmd):
         # cli: close the window first, then restart it on the compacted session.
         sid = cmd.get("session_id")
         if not sid:
-            await post(f"/agent/{name}/out", {"text": "compact: нет активной сессии"})
+            await post(f"/agent/{name}/notify", {"text": "compact: нет активной сессии"})
             return
         is_cli = cmd.get("mode") == "cli"
         if is_cli:
-            await post(f"/agent/{name}/out", {"text": "🗜 сжимаю: закрываю окно → резюме → рестарт на свежей сессии…"})
+            await post(f"/agent/{name}/notify", {"text": "🗜 сжимаю: закрываю окно → резюме → рестарт на свежей сессии…"})
             pp = _cli_procs.pop(name, None)
             if pp:
                 try:
@@ -497,11 +497,11 @@ async def handle(cmd):
         if is_cli:
             pid = _spawn_cli(name, project, cmd.get("model"), session_id=newsid)
             await post(f"/agent/{name}/session", {"session_id": newsid, "status": "running"})
-            await post(f"/agent/{name}/out",
+            await post(f"/agent/{name}/notify",
                        {"text": f"🗜 сжато, окно перезапущено на свежей сессии (pid {pid}).\n\n{summary[:400]}"})
         else:
             await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
-            await post(f"/agent/{name}/out", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
+            await post(f"/agent/{name}/notify", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
 
     elif t == "usage_all":
         await post("/usage_report", {"text": _usage_panel()})
@@ -509,10 +509,10 @@ async def handle(cmd):
     elif t == "list_sessions":
         sessions = _list_sessions(project)
         if not sessions:
-            await post(f"/agent/{name}/out", {"text": "сессий в этой папке не найдено"})
+            await post(f"/agent/{name}/notify", {"text": "сессий в этой папке не найдено"})
         else:
             lines = [f"{i + 1}. {sid}  ({ts}, {sz}KB)" for i, (sid, ts, sz) in enumerate(sessions[:15])]
-            await post(f"/agent/{name}/out", {"text": "Сессии папки (новые сверху):\n" + "\n".join(lines)
+            await post(f"/agent/{name}/notify", {"text": "Сессии папки (новые сверху):\n" + "\n".join(lines)
                                               + "\n\nвыбрать: /use <agent> <id>"})
 
     elif t == "status":
@@ -523,7 +523,7 @@ async def handle(cmd):
         if tok is not None:
             warn = " — пора /compact" if tok > 150000 else ""
             parts.append(f"контекст сессии ~{tok // 1000}k токенов{warn}")
-        await post(f"/agent/{name}/out", {"text": "runner: " + " · ".join(parts)})
+        await post(f"/agent/{name}/notify", {"text": "runner: " + " · ".join(parts)})
 
     elif t == "coordinate":
         await _coordinate(cmd.get("text", ""), cmd.get("agents", []), cmd.get("machines", []))
@@ -541,9 +541,9 @@ async def handle(cmd):
             try:
                 pid = _spawn_cli(name, cmd["project_path"], cmd.get("model"))
                 asyncio.create_task(_detect_cli_session(name, cmd["project_path"]))
-                await post(f"/agent/{name}/out", {"text": f"♻️ {name} (cli) перезапущен, pid {pid}"})
+                await post(f"/agent/{name}/notify", {"text": f"♻️ {name} (cli) перезапущен, pid {pid}"})
             except Exception as e:
-                await post(f"/agent/{name}/out", {"text": f"restart ошибка: {e}"})
+                await post(f"/agent/{name}/notify", {"text": f"restart ошибка: {e}"})
         log.info(f"{t} {name}")
 
 
@@ -575,7 +575,7 @@ async def monitor():
             if p.poll() is not None:
                 log.info(f"cli window for {n} exited (code {p.returncode})")
                 _cli_procs.pop(n, None)
-                await post(f"/agent/{n}/out", {"text": f"⚠️ cli-окно агента «{n}» закрылось. /restart {n} чтобы поднять."})
+                await post(f"/agent/{n}/notify", {"text": f"⚠️ cli-окно агента «{n}» закрылось. /restart {n} чтобы поднять."})
         _write_status()
         await asyncio.sleep(15)
 

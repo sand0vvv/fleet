@@ -11,6 +11,7 @@ import os
 import sys
 import hmac
 import asyncio
+import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
@@ -20,6 +21,10 @@ import transcribe
 import util
 from wsmanager import manager
 import config
+
+# backend-topic commands -> which endpoint to GET on the bound backend_url
+BACKEND_CMD_MAP = {"paper": "paper", "stats": "paper", "status": "health",
+                   "rejections": "rejections/summary", "signals": "signals", "config": "config"}
 
 app = FastAPI(title="fleet-backend")
 SUPERGROUP = config.SUPERGROUP_CHAT_ID or None
@@ -70,6 +75,30 @@ def _room_targets(text, members):
     t = (text or "").lower()
     tagged = [m for m in members if m.get("bot") and f"@{m['bot']}" in t]
     return tagged if tagged else list(members)
+
+
+async def _fetch_backend(url, path):
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(f"{url.rstrip('/')}/{path}")
+            return r.text[:1800]
+    except Exception as e:
+        return f"(ошибка запроса: {e})"
+
+
+async def _handle_backend_topic(topic_id, room, text):
+    """Backend topic: owner runs /paper /stats /rejections /signals /config /status -> GET the
+    bound backend and post the result. Telemetry is pushed here by the backend via /backend/post."""
+    t = (text or "").strip()
+    if not t:
+        return
+    cmd = t.lstrip("/").split()[0].lower()
+    path = BACKEND_CMD_MAP.get(cmd)
+    if path and room.get("backend_url"):
+        result = await _fetch_backend(room["backend_url"], path)
+        await reply(topic_id, f"📊 /{cmd}\n{result}")
+    else:
+        await reply(topic_id, "команды: /paper · /stats · /rejections · /signals · /config · /status")
 
 
 # ── debounce + reliable delivery (per-agent cursor; deliver carries `mid`) ──────
@@ -233,9 +262,13 @@ async def tg_update(req: Request):
             await cmd_coordinate(text)
         return {"ok": True}
 
-    # room topic? (reusable multi-agent; reply-follows-origin). Folder topics fall through unchanged.
+    # room topic? (reusable; reply-follows-origin). Folder topics fall through unchanged.
     room = db.get_room(thread_id)
-    if room and room.get("kind") == "pair":
+    if room:
+        if room.get("kind") == "backend":
+            await _handle_backend_topic(thread_id, room, text)
+            return {"ok": True}
+        # pair room: route owner message to members by @<bot> tag (no tag -> both)
         if text.startswith("/"):
             await handle_command(text)
             return {"ok": True}
@@ -266,7 +299,7 @@ async def tg_update(req: Request):
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
 KNOWN_COMMANDS = {"spawn", "list", "machines", "status", "kill", "restart", "mode", "model",
-                  "rename", "sessions", "use", "new", "stop", "compact", "usage", "help", "create"}
+                  "rename", "sessions", "use", "new", "stop", "compact", "usage", "help", "create", "backend"}
 
 
 def _command_of(text):
@@ -314,8 +347,25 @@ async def handle_command(text, agent=None):
         await cmd_rename(args, agent)
     elif cmd == "create":
         await cmd_create(args)
+    elif cmd == "backend":
+        await cmd_backend(args)
     else:
         await reply(None, f"неизвестная команда: /{cmd}")
+
+
+async def cmd_backend(args):
+    """/backend <name> <url> — telemetry topic bound to a backend. The backend pushes statuses here
+    (via /backend/post) and the owner queries it with /paper /stats /rejections /signals /config /status."""
+    if len(args) < 2:
+        return await reply(None, "usage: /backend <название> <url>")
+    name, url = args[0], args[1]
+    topic_id = await tg.create_forum_topic(SUPERGROUP, name)
+    if not topic_id:
+        return await reply(None, "не смог создать топик")
+    db.create_room(topic_id, name, [], kind="backend", backend_url=url)
+    await reply(topic_id, f"📊 Бэкенд-топик «{name}» → {url}\n"
+                          f"Команды: /paper · /stats · /rejections · /signals · /config · /status")
+    await reply(None, f"✅ бэкенд-топик «{name}» создан (topic {topic_id})")
 
 
 async def cmd_create(args):
@@ -597,6 +647,32 @@ async def agent_inject(name: str, req: Request):
         a = db.get_agent(name)
         if a and a.get("topic_id"):
             await reply(a["topic_id"], body.get("text", ""))  # fallback: post to topic
+    return {"ok": True}
+
+
+@app.post("/agent/{name}/notify")
+async def agent_notify(name: str, req: Request):
+    """SYSTEM/runner notification -> the agent's FOLDER topic ALWAYS (never reply-origin).
+    Keeps 'window closed / restarted' etc. out of rooms — they belong where the agent lives."""
+    body = await req.json()
+    a = db.get_agent(name)
+    if not a or not SUPERGROUP:
+        return {"ok": False}
+    r = await tg.send_message(SUPERGROUP, body.get("text", ""), message_thread_id=a["topic_id"])
+    tgid = (r.get("result") or {}).get("message_id") if r else None
+    db.log_message(a["id"], "out", body.get("text", ""), tg_message_id=tgid)
+    return {"ok": True}
+
+
+@app.post("/backend/post")
+async def backend_post(req: Request):
+    """A backend pushes telemetry into its dedicated backend topic. Body: {room, text}."""
+    body = await req.json()
+    ref = str(body.get("room", ""))
+    room = db.get_room(int(ref)) if ref.lstrip("-").isdigit() else db.get_room_by_name(ref)
+    if not room or not SUPERGROUP:
+        return {"ok": False}
+    await tg.send_message(SUPERGROUP, body.get("text", ""), message_thread_id=room["topic_id"])
     return {"ok": True}
 
 
