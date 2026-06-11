@@ -1,5 +1,6 @@
 """Telegram Bot API client (async, httpx)."""
 import os
+import asyncio
 import httpx
 from config import TG_API, TG_FILE
 
@@ -8,16 +9,26 @@ from config import TG_API, TG_FILE
 # (a long hang here cascades into WS-handshake timeouts and crash-loops). Failures are
 # swallowed and reported as {"ok": False} — outbound delivery degrades, control plane survives.
 _TG_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+_TG_RETRIES = 3
 
 
 async def _post(method, **params):
-    try:
-        async with httpx.AsyncClient(timeout=_TG_TIMEOUT) as c:
-            r = await c.post(f"{TG_API}/{method}", json={k: v for k, v in params.items() if v is not None})
-            return r.json()
-    except Exception as e:
-        print(f"[telegram] {method} failed: {e}")
-        return {"ok": False, "error": str(e)}
+    """POST to the Telegram API with a few quick retries — Railway↔Telegram egress is intermittently
+    flaky, and a brief blip shouldn't lose a reply/restart confirmation. Logs the REAL exception type
+    (the old empty error told us nothing) so an ongoing outage is diagnosable, not a mystery."""
+    payload = {k: v for k, v in params.items() if v is not None}
+    last = None
+    for attempt in range(1, _TG_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=_TG_TIMEOUT) as c:
+                r = await c.post(f"{TG_API}/{method}", json=payload)
+                return r.json()
+        except Exception as e:
+            last = e
+            print(f"[telegram] {method} attempt {attempt}/{_TG_RETRIES} failed: {type(e).__name__}: {e!r}")
+            if attempt < _TG_RETRIES:
+                await asyncio.sleep(0.8 * attempt)
+    return {"ok": False, "error": f"{type(last).__name__}: {last}"}
 
 
 async def send_message(chat_id, text, message_thread_id=None, reply_to=None):
