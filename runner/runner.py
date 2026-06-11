@@ -607,7 +607,8 @@ async def monitor():
 async def serve_once():
     global _connected
     url = f"{BACKEND_WS}?machine={MACHINE}&token={TOKEN}"
-    async with websockets.connect(url, max_size=None) as ws:
+    async with websockets.connect(url, max_size=None, open_timeout=30,
+                                   ping_interval=20, ping_timeout=20) as ws:
         _connected = True
         _write_status()
         log.info(f"connected to {BACKEND_WS} as {MACHINE}")

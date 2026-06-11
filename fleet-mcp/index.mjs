@@ -166,7 +166,21 @@ function connectStream() {
   if (!STREAM_WS) { flog("cli mode but FLEET_STREAM_WS empty!"); return; }
   flog("connecting stream:", STREAM_WS);
   const ws = new WebSocket(STREAM_WS);
-  ws.on("open", () => flog("stream OPEN for", AGENT));
+  // Heartbeat: without it a half-open socket (Railway idle-timeout / network blip) never fires "close",
+  // so the client thinks it's connected while the backend has already dropped it -> "cli не на связи"
+  // until a manual /restart. Ping every 20s; if the prior ping got no pong, the link is dead -> kill it
+  // (which fires "close" -> the 3s reconnect below). This is what stops the bogus offline state.
+  let alive = true, pingTimer = null;
+  ws.on("open", () => {
+    flog("stream OPEN for", AGENT);
+    alive = true;
+    pingTimer = setInterval(() => {
+      if (!alive) { flog("stream no pong -> terminate"); try { ws.terminate(); } catch {} return; }
+      alive = false;
+      try { ws.ping(); } catch {}
+    }, 20000);
+  });
+  ws.on("pong", () => { alive = true; });
   ws.on("message", async (data) => {
     flog("stream msg:", data.toString().slice(0, 200));
     try {
@@ -186,8 +200,12 @@ function connectStream() {
       if (mid) { setHw(mid); await ack(mid); }
     } catch (e) { flog("bad stream frame:", e.message); }
   });
-  ws.on("close", (c) => { flog("stream CLOSE", c, "-> reconnect 3s"); setTimeout(connectStream, 3000); });
-  ws.on("error", (e) => flog("stream ERROR:", e.message));
+  ws.on("close", (c) => {
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    flog("stream CLOSE", c, "-> reconnect 3s");
+    setTimeout(connectStream, 3000);
+  });
+  ws.on("error", (e) => { flog("stream ERROR:", e.message); try { ws.terminate(); } catch {} });
 }
 
 async function main() {

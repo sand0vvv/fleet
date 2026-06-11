@@ -4,10 +4,20 @@ import httpx
 from config import TG_API, TG_FILE
 
 
+# Short, bounded timeout so a Telegram egress blip can never wedge the event loop
+# (a long hang here cascades into WS-handshake timeouts and crash-loops). Failures are
+# swallowed and reported as {"ok": False} — outbound delivery degrades, control plane survives.
+_TG_TIMEOUT = httpx.Timeout(8.0, connect=5.0)
+
+
 async def _post(method, **params):
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(f"{TG_API}/{method}", json={k: v for k, v in params.items() if v is not None})
-        return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=_TG_TIMEOUT) as c:
+            r = await c.post(f"{TG_API}/{method}", json={k: v for k, v in params.items() if v is not None})
+            return r.json()
+    except Exception as e:
+        print(f"[telegram] {method} failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 async def send_message(chat_id, text, message_thread_id=None, reply_to=None):
@@ -25,39 +35,51 @@ async def send_message_as(api_base, chat_id, text, message_thread_id=None):
     Used for the Docker (@hud113) identity in the war-room so the owner sees a distinct sender."""
     chunks = [text[i:i + 4000] for i in range(0, len(text or " "), 4000)] or [" "]
     last = None
-    async with httpx.AsyncClient(timeout=30) as c:
-        for ch in chunks:
-            r = await c.post(f"{api_base}/sendMessage",
-                             json={k: v for k, v in {"chat_id": chat_id, "text": ch,
-                                                     "message_thread_id": message_thread_id}.items() if v is not None})
-            last = r.json()
+    try:
+        async with httpx.AsyncClient(timeout=_TG_TIMEOUT) as c:
+            for ch in chunks:
+                r = await c.post(f"{api_base}/sendMessage",
+                                 json={k: v for k, v in {"chat_id": chat_id, "text": ch,
+                                                         "message_thread_id": message_thread_id}.items() if v is not None})
+                last = r.json()
+    except Exception as e:
+        print(f"[telegram] send_message_as failed: {e}")
+        return {"ok": False, "error": str(e)}
     return last
 
 
 async def send_document(chat_id, file_path, caption=None, message_thread_id=None, filename=None):
-    async with httpx.AsyncClient(timeout=120) as c:
-        with open(file_path, "rb") as f:
-            data = {"chat_id": str(chat_id)}
-            if caption:
-                data["caption"] = caption[:1024]
-            if message_thread_id:
-                data["message_thread_id"] = str(message_thread_id)
-            r = await c.post(f"{TG_API}/sendDocument", data=data,
-                             files={"document": (filename or os.path.basename(file_path), f)})
-            return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as c:
+            with open(file_path, "rb") as f:
+                data = {"chat_id": str(chat_id)}
+                if caption:
+                    data["caption"] = caption[:1024]
+                if message_thread_id:
+                    data["message_thread_id"] = str(message_thread_id)
+                r = await c.post(f"{TG_API}/sendDocument", data=data,
+                                 files={"document": (filename or os.path.basename(file_path), f)})
+                return r.json()
+    except Exception as e:
+        print(f"[telegram] send_document failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 async def send_photo(chat_id, file_path, caption=None, message_thread_id=None, filename=None):
-    async with httpx.AsyncClient(timeout=120) as c:
-        with open(file_path, "rb") as f:
-            data = {"chat_id": str(chat_id)}
-            if caption:
-                data["caption"] = caption[:1024]
-            if message_thread_id:
-                data["message_thread_id"] = str(message_thread_id)
-            r = await c.post(f"{TG_API}/sendPhoto", data=data,
-                             files={"photo": (filename or os.path.basename(file_path), f)})
-            return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as c:
+            with open(file_path, "rb") as f:
+                data = {"chat_id": str(chat_id)}
+                if caption:
+                    data["caption"] = caption[:1024]
+                if message_thread_id:
+                    data["message_thread_id"] = str(message_thread_id)
+                r = await c.post(f"{TG_API}/sendPhoto", data=data,
+                                 files={"photo": (filename or os.path.basename(file_path), f)})
+                return r.json()
+    except Exception as e:
+        print(f"[telegram] send_photo failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 async def create_forum_topic(chat_id, name):
