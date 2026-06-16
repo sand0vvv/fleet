@@ -44,8 +44,23 @@ def set_machine_offline(name):
     q("UPDATE fleet.machines SET status='offline' WHERE name=%s", (name,), fetch=None)
 
 
+# A machine is ONLINE only if its last heartbeat is recent; otherwise it's STALE even if the
+# `status` column still says 'online' (e.g. a CLOSE 1006 abnormal drop never ran the clean
+# disconnect path). Presence = recent heartbeat, NOT a sticky column. (~75s ≈ 3 missed 25s beats.)
+STALE_AFTER_SECONDS = 75
+
+
 def list_machines():
-    return q("SELECT name, status, last_seen FROM fleet.machines ORDER BY name")
+    """Status reflects PRESENCE: 'online' only if heartbeat within STALE_AFTER_SECONDS, else 'offline'.
+    Fail-closed — a machine we haven't heard from is treated as down, never as a zombie 'online'."""
+    return q(
+        """SELECT name,
+                  CASE WHEN last_seen IS NOT NULL
+                            AND last_seen > now() - (%s || ' seconds')::interval
+                       THEN 'online' ELSE 'offline' END AS status,
+                  last_seen
+           FROM fleet.machines ORDER BY name""",
+        (STALE_AFTER_SECONDS,))
 
 
 def get_machine(name):

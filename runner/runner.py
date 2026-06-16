@@ -17,6 +17,7 @@ import re
 import sys
 import json
 import time
+import random
 import asyncio
 import pathlib
 import argparse
@@ -557,7 +558,7 @@ async def heartbeat(ws):
         try:
             await ws.send(json.dumps({"type": "heartbeat"}))
         except Exception:
-            return
+            return  # send failed -> socket dead; serve_once's recv will unwind and reconnect
 
 
 def _write_status():
@@ -604,14 +605,30 @@ async def monitor():
         await asyncio.sleep(15)
 
 
+async def _reannounce():
+    """On every (re)connect, re-register live cli agents on the backend so it reflects reality
+    after a backend restart (the WS connect already re-marks the machine online + replays
+    headless inbox). Idempotent — /agent/{name}/session just upserts the running state."""
+    for name, p in list(_cli_procs.items()):
+        if p.poll() is None:  # window still alive
+            meta = _cli_meta.get(name) or {}
+            proj = meta.get("project")
+            sessions = _list_sessions(proj) if proj else []
+            if sessions:
+                await post(f"/agent/{name}/session", {"session_id": sessions[0][0], "status": "running"})
+
+
 async def serve_once():
     global _connected
     url = f"{BACKEND_WS}?machine={MACHINE}&token={TOKEN}"
+    # ping_interval/ping_timeout: websockets sends WS pings; a half-open socket (no pong, e.g. a
+    # silent CLOSE 1006 abnormal drop) raises ConnectionClosed within ~ping_timeout -> we reconnect.
     async with websockets.connect(url, max_size=None, open_timeout=30,
-                                   ping_interval=20, ping_timeout=20) as ws:
+                                   ping_interval=20, ping_timeout=20, close_timeout=10) as ws:
         _connected = True
         _write_status()
         log.info(f"connected to {BACKEND_WS} as {MACHINE}")
+        asyncio.create_task(_reannounce())   # re-register active cli agents after (re)connect
         hb = asyncio.create_task(heartbeat(ws))
         try:
             async for raw in ws:
@@ -637,12 +654,28 @@ async def start():
     log.info(f"  logs    : {os.path.join(LOG_DIR, 'runner.log')}")
     log.info("=" * 56)
     asyncio.create_task(monitor())
+    # Reconnect forever (the backend restarts; we must always crawl back). Exponential backoff
+    # with jitter so a flapping backoff doesn't hammer it, capped at 30s. Reset to base on a
+    # connection that lived a meaningful while (a real session, not an instant flap).
+    backoff_base, backoff_max = 1.0, 30.0
+    delay = backoff_base
+    attempt = 0
     while True:
+        started = time.time()
         try:
             await serve_once()
+            # clean close (backend went away gracefully) — treat like any drop, reconnect
+            log.info("ws closed by backend, reconnecting")
         except Exception as e:
-            log.error(f"ws error, reconnecting in 5s: {e}")
-        await asyncio.sleep(5)
+            log.error(f"ws error: {e}")
+        lived = time.time() - started
+        if lived >= 60:           # the link was healthy for a while -> reset backoff
+            delay, attempt = backoff_base, 0
+        attempt += 1
+        sleep_for = min(delay, backoff_max) * (1 + random.random() * 0.3)  # +0–30% jitter
+        log.info(f"reconnect attempt #{attempt} in {sleep_for:.1f}s")
+        await asyncio.sleep(sleep_for)
+        delay = min(delay * 2, backoff_max)
 
 
 def show_status():

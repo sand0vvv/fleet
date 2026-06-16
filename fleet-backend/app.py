@@ -11,6 +11,7 @@ import os
 import sys
 import hmac
 import asyncio
+import datetime
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import JSONResponse
@@ -401,6 +402,9 @@ async def cmd_spawn(args):
     m = db.get_machine(machine)
     if not m:
         return await reply(None, f"машина '{machine}' не зарегистрирована (runner не подключался)")
+    # presence-aware: a registered-but-offline machine can't receive the spawn push — fail-closed
+    if not manager.is_online(machine):
+        return await reply(None, f"машина '{machine}' оффлайн (runner не на связи) — подними runner и повтори")
     name = util.agent_name_from_path(path) or machine
     if not SUPERGROUP:
         return await reply(None, "не знаю chat_id супергруппы — напиши что-нибудь в группе")
@@ -425,7 +429,20 @@ async def cmd_machines():
     rows = db.list_machines() or []
     if not rows:
         return await reply(None, "машин нет")
-    await reply(None, "Машины:\n" + "\n".join(f"• {r['name']} — {r['status']}" for r in rows))
+
+    def _line(r):
+        # status is presence-based (recent heartbeat). Show last_seen age for offline ones.
+        mark = "🟢" if r["status"] == "online" else "🔴"
+        age = ""
+        if r["status"] != "online" and r.get("last_seen"):
+            try:
+                secs = int((datetime.datetime.now(datetime.timezone.utc) - r["last_seen"]).total_seconds())
+                age = f" (последний раз {secs // 60}м {secs % 60}с назад)" if secs >= 60 else f" ({secs}с назад)"
+            except Exception:
+                pass
+        return f"{mark} {r['name']} — {r['status']}{age}"
+
+    await reply(None, "Машины:\n" + "\n".join(_line(r) for r in rows))
 
 
 async def cmd_status(args):
@@ -773,10 +790,15 @@ async def ws_runner(ws: WebSocket):
         while True:
             data = await ws.receive_json()
             if data.get("type") == "heartbeat":
-                db.touch_machine(machine)
+                db.touch_machine(machine)   # presence = recent heartbeat
     except WebSocketDisconnect:
-        manager.disconnect(machine)
         log(f"runner disconnected: {machine}")
+    except Exception as e:
+        # CLOSE 1006 / abnormal drop won't always surface as WebSocketDisconnect — catch all so
+        # the machine never stays a zombie 'online'. Pass `ws` so a fresh reconnect isn't evicted.
+        log(f"runner ws error ({machine}): {e}")
+    finally:
+        manager.disconnect(machine, ws)
 
 
 @app.websocket("/agent/{name}/stream")
