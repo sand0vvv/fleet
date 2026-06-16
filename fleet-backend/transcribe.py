@@ -53,13 +53,37 @@ def _local(audio: bytes) -> str:
 
 
 async def transcribe_url(file_url: str) -> str:
+    """Transcribe a voice file. NEVER returns a silent empty string on failure — returns a visible
+    marker so the agent/owner knows it failed (a silent '' reads as 'нихуя' to the owner). Order:
+    Groq (1 retry) -> local faster-whisper fallback -> marker."""
     try:
         audio = await _download(file_url)
-        if GROQ_API_KEY:
-            log("using Groq API")
-            return await _groq(audio)
-        log(f"using local faster-whisper ({WHISPER_MODEL})")
-        return _local(audio)
     except Exception as e:
-        log("failed:", e)
-        return ""
+        log("download failed:", e)
+        return "[🎤 не смог скачать голосовое — повтори]"
+
+    if GROQ_API_KEY:
+        for attempt in (1, 2):
+            try:
+                txt = await _groq(audio)
+                if txt:
+                    return txt
+                log(f"groq returned empty (attempt {attempt})")
+            except Exception as e:
+                log(f"groq failed (attempt {attempt}):", e)
+        # Groq exhausted/limited/erroring -> try local whisper as a fallback
+        try:
+            log("groq unavailable -> local faster-whisper fallback")
+            txt = _local(audio)
+            if txt:
+                return txt
+        except Exception as e:
+            log("local fallback failed:", e)
+        return "[🎤 голос не распознал — транскрипция недоступна (вероятно лимит Groq). Повтори текстом]"
+
+    # no Groq key -> local only
+    try:
+        return _local(audio) or "[🎤 голос не распознал — повтори текстом]"
+    except Exception as e:
+        log("local failed:", e)
+        return "[🎤 голос не распознал — повтори текстом]"
