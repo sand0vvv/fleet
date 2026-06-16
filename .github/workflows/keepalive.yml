@@ -1,0 +1,28 @@
+name: keepalive
+
+# Пингуем сервисы флота каждые 5 минут, чтобы Railway не усыплял их за неактивность
+# (именно сон ресивера ронял доставку из Telegram). Бесплатно, на GitHub-раннерах —
+# НЕ ест ни ресурсы Railway, ни локальные ресурсы.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep fleet services warm
+        run: |
+          urls=(
+            "https://your-backend.example.com/health"
+            "https://your-receiver.example.com/health"
+          )
+          fail=0
+          for u in "${urls[@]}"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -m 25 "$u" || echo "000")
+            echo "$u -> $code"
+            if [ "$code" != "200" ]; then fail=1; fi
+          done
+          # не валим job из-за разовой осечки — задача лишь держать сервисы тёплыми
+          if [ "$fail" = "1" ]; then echo "::warning::один из сервисов вернул не-200 (возможен холодный старт)"; fi
