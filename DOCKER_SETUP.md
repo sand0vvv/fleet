@@ -1,0 +1,90 @@
+# Docker — поднять изолированный флот для оператора (по шагам)
+
+Отдельный стек: свой бот (Docker), своя супергруппа (владелец + оператор), свой Supabase-проект,
+свой бэкенд+receiver на Railway (ветка `operator`), свой runner В КОНТЕЙНЕРЕ на компе владельца.
+Существующий флот владельца (`main`) НЕ трогается.
+
+Клетка: контейнер видит на хосте ТОЛЬКО папку `C:\operator` (→ `/workspace`). Файлы владельца невидимы.
+
+---
+
+## 0. Что нужно заранее
+- Бот Docker создан, токен на руках. ✅
+- Telegram-ID оператора (число). Узнать: переслать его сообщение боту @userinfobot, или из логов бэкенда.
+- Новый Supabase-проект (DATABASE_URL — connection string, pooler). ✅
+- Docker Desktop на компе владельца запущен.
+- Один общий секрет `RUNNER_SECRET` — придумать строку (одна и та же в бэкенде, receiver и runner).
+
+## 1. Telegram (владелец)
+1. Создать супергруппу, включить **Topics** (форум-режим).
+2. Добавить туда бота Docker и сделать его админом (право управлять топиками).
+3. Добавить оператора.
+4. Узнать Telegram-ID оператора (нужен в `OWNER_TG_ID` бэкенда — в этом стеке «владелец» = оператор).
+
+## 2. База (применить миграции в НОВЫЙ Supabase)
+Из папки fleet, с DATABASE_URL нового проекта:
+```
+set DATABASE_URL=postgresql://...   (новый Supabase)
+python migrations/db.py "%~f migrations\001_fleet_schema.sql"   # по одному, по порядку 001..005
+```
+(или прогнать все 001→005; SQL идемпотентный, схема `fleet`).
+
+## 3. Бэкенд Docker на Railway (ветка `operator`, папка `fleet-backend/`)
+Env:
+- `DATABASE_URL` = новый Supabase
+- `TELEGRAM_BOT_TOKEN` = токен бота **Docker** (в этом стеке Docker — основной бот)
+- `OWNER_TG_ID` = Telegram-ID **оператора**
+- `RUNNER_SECRET` = общий секрет (см. шаг 0)
+- `SUPERGROUP_CHAT_ID` = можно не задавать (бэкенд узнает из первого апдейта владельца), либо вписать id группы
+- `GROQ_API_KEY` = опц. (голос→текст; без него голос не нужен)
+
+## 4. Receiver Docker на Railway (ветка `operator`, папка `receiver/`)
+Env:
+- `FLEET_BACKEND_URL` = URL бэкенда из шага 3
+- `FLEET_TOKEN` = тот же `RUNNER_SECRET` (бэкенд проверяет `x-fleet-token` на `/tg/update`)
+- `TELEGRAM_WEBHOOK_SECRET` = опц. (если задашь — поставь тем же значением в setWebhook)
+
+Вебхук бота Docker → на receiver:
+```
+https://api.telegram.org/bot<DOCKER_TOKEN>/setWebhook?url=https://<docker-receiver>.up.railway.app/webhook/telegram
+```
+⚠️ Известная засада ([[fleet-webhook-fix]]): если receiver засыпает — Telegram-вебхук таймаутит.
+Держать receiver тёплым (трафик/план) ИЛИ как фолбэк указать вебхук прямо на бэкенд `/tg/update`.
+
+## 5. Runner в контейнере (комп владельца)
+1. `git checkout operator` в папке fleet.
+2. `copy runner\.env.docker.example runner\.env` и заполнить:
+   - `FLEET_BACKEND_HTTP`/`FLEET_BACKEND_WS` = URL бэкенда Docker (ws = `.../ws/runner`)
+   - `MACHINE_NAME=docker`
+   - `RUNNER_TOKEN` = общий секрет (= `RUNNER_SECRET` бэкенда)
+3. Создать папку `C:\operator` (территория оператора).
+4. Сборка и запуск:
+   ```
+   docker compose -f docker-compose.docker.yml up -d --build
+   ```
+5. Логин Claude в контейнере (ОДИН раз, под отдельным аккаунтом = подписка владельца):
+   ```
+   docker compose -f docker-compose.docker.yml exec docker-runner claude
+   ```
+   пройти OAuth по ссылке. Креды лягут в том `docker-claude`, переживут рестарт.
+6. Проверка связи:
+   ```
+   docker compose -f docker-compose.docker.yml exec docker-runner python3 runner.py doctor
+   ```
+   должно показать backend `/health` OK и `claude --version`.
+
+## 6. Приёмка (тест клетки — КРИТИЧНО)
+1. оператор из супергруппы: `/spawn docker /workspace headless` (machine = `docker`).
+2. Написать агенту в его топик: «сделай `ls /` и `ls /workspace`».
+   → агент должен видеть ТОЛЬКО `/workspace` и системные папки контейнера; НИ ОДНОЙ хостовой
+   папки владельца (`C:\Users\...`, Desktop, poly, backend) быть НЕ должно. Это и есть доказательство клетки.
+3. Круг туда-обратно: сообщение → ответ в Telegram; отправить файл → агент его принимает в `.inbox`.
+4. Готово — отдать оператору.
+
+---
+
+## Заметки
+- `--dangerously-skip-permissions` внутри контейнера безопасно: контейнер = клетка.
+- Гео: Docker ходит наружу через IP хоста (владельца) — лечит бан, который был на аккаунте оператора.
+- Аккаунт = подписка владельца: Docker ест те же лимиты 5ч/неделя; риск бана — на аккаунте владельца (его выбор).
+- Движки (codex/claudex) — НЕ здесь. оператору = текущая логика fleet (claude+headless). codex = отдельно, позже.

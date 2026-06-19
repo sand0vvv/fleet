@@ -1,0 +1,26 @@
+# Docker — isolated fleet runner for Operator. Runs on the OWNER's PC (Docker Desktop).
+# The container is the JAIL: the only host disk the operator's agents can touch is the workspace volume below.
+# Bring up:   docker compose -f docker-compose.docker.yml up -d --build
+# Logs:       docker compose -f docker-compose.docker.yml logs -f
+# Login once: docker compose -f docker-compose.docker.yml exec docker-runner claude   (then OAuth in browser)
+services:
+  docker-runner:
+    build:
+      context: .
+      dockerfile: runner/Dockerfile
+    container_name: docker-runner
+    env_file:
+      - runner/.env            # copy runner/.env.docker.example -> runner/.env and fill (Docker backend + secret)
+    volumes:
+      # the operator's working dir. THE ONLY host folder visible inside. Agents /spawn into /workspace.
+      # Change the left side only if you move the folder; keep the right side /workspace.
+      - "C:/operator:/workspace"
+      # persist Claude login (OAuth creds) + agent sessions across restarts — login once, stays.
+      - docker-claude:/root/.claude
+      # persist runner delivery cursors + logs (the exactly-once dedup must survive restarts).
+      - docker-state:/app/runner/.fleet
+    restart: unless-stopped
+
+volumes:
+  docker-claude:
+  docker-state:
