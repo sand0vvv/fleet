@@ -3,7 +3,17 @@ import os
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-OWNER_TG_ID = int(os.environ.get("OWNER_TG_ID", "0") or "0")
+# OWNER_TG_ID accepts MULTIPLE ids (comma/semicolon-separated) — Docker's group has two "owners":
+# the human owner (who created the supergroup) AND Operator (who drives his agents). Both may command.
+OWNER_TG_IDS = set()
+for _x in (os.environ.get("OWNER_TG_ID", "") or "").replace(";", ",").split(","):
+    _x = _x.strip()
+    if _x:
+        try:
+            OWNER_TG_IDS.add(int(_x))
+        except ValueError:
+            pass
+OWNER_TG_ID = next(iter(OWNER_TG_IDS), 0)   # back-compat: primary/first id
 # Shared secret: runners/fleet-mcp/receiver must present it. Empty = auth disabled (dev).
 RUNNER_SECRET = os.environ.get("RUNNER_SECRET", "")
 # Supergroup chat id (negative number). If empty, backend learns it from the first owner update.

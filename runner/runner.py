@@ -45,6 +45,11 @@ TOKEN = os.environ.get("RUNNER_TOKEN", "dev")
 CHANNEL_MODE = os.environ.get("FLEET_CHANNEL_MODE", "dev")
 
 _agent_locks = {}  # serialize claude runs per agent (one session at a time)
+_last_tok_warn = {}  # name -> last token level we warned about (don't spam the /compact nudge)
+# Proactive /compact nudge: a headless session GROWS every message (--resume), and a fat session burns
+# the account limit on EVERY turn. Warn the user when it's big so they /compact (critical for Docker:
+# Operator runs on the owner's shared subscription — an unmanaged session would eat the limits fast).
+TOKEN_WARN = int(os.environ.get("FLEET_TOKEN_WARN", "140000"))
 _cli_procs = {}    # name -> Popen (cli-mode visible windows)
 _cli_meta = {}     # name -> {"project":..., "model":...} (for watchdog auto-restart)
 _restart_times = {}  # name -> [recent auto-restart epochs] (crash-loop guard)
@@ -473,6 +478,16 @@ async def handle(cmd):
             result, sid = await run_claude(project, prompt, cmd.get("model"), cmd.get("session_id"), name)
             await post(f"/agent/{name}/notify", {"text": result})
             await post(f"/agent/{name}/session", {"session_id": sid, "status": "idle"})
+            # proactive token nudge: warn once per ~15k growth past the threshold so the user /compacts
+            try:
+                tok = _session_tokens(project, sid)
+                if tok and tok >= TOKEN_WARN and tok - _last_tok_warn.get(name, 0) >= 15000:
+                    _last_tok_warn[name] = tok
+                    await post(f"/agent/{name}/notify", {"text":
+                        f"⚠️ Контекст этой сессии ~{tok // 1000}k токенов — пора сжать: пришли `/compact {name}`. "
+                        f"Иначе каждое сообщение будет жечь лимиты по полной."})
+            except Exception as e:
+                log.error(f"token-warn failed: {e}")
         if mid:
             _set_hw(name, mid)
             await _ack(name, mid)
@@ -499,6 +514,7 @@ async def handle(cmd):
         summary, _ = await run_claude(project, summ_prompt, cmd.get("model"), sid, name)
         seed = f"[Резюме предыдущей сессии]\n{summary}\n\nЭто контекст для продолжения. Подтверди коротко."
         _, newsid = await run_claude(project, seed, cmd.get("model"), "", name)  # "" = fresh
+        _last_tok_warn[name] = 0   # fresh session — re-arm the token nudge
         if is_cli:
             pid = _spawn_cli(name, project, cmd.get("model"), session_id=newsid)
             await post(f"/agent/{name}/session", {"session_id": newsid, "status": "running"})

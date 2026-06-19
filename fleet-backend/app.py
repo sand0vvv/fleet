@@ -206,7 +206,7 @@ async def tg_update(req: Request):
     thread_id = msg.get("message_thread_id")
     log(f"update from={frm} chat={chat.get('id')} thread={thread_id} keys={[k for k in msg if k not in ('from','chat')]}")
 
-    if config.OWNER_TG_ID and frm != config.OWNER_TG_ID:
+    if config.OWNER_TG_IDS and frm not in config.OWNER_TG_IDS:
         log(f"ignored non-owner {frm}")
         return {"ok": True}
 
