@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Claude Code CLI — the engine the runner spawns per agent.
 RUN npm install -g @anthropic-ai/claude-code
 
+# Claude refuses --dangerously-skip-permissions as root. The container IS the jail (only /workspace is
+# mounted), so it's safe here: IS_SANDBOX=1 tells Claude Code it's in a sandbox and lifts the root guard.
+# Inherited by the claude subprocesses the runner spawns.
+ENV IS_SANDBOX=1
+
 WORKDIR /app
 COPY . /app
 
