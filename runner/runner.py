@@ -580,6 +580,15 @@ async def handle(cmd):
             parts.append(f"контекст сессии ~{tok // 1000}k токенов{warn}")
         await post(f"/agent/{name}/notify", {"text": "runner: " + " · ".join(parts)})
 
+    elif t == "context":
+        # native Claude Code /context — dispatchable in -p; returns the real context-window breakdown
+        sid = cmd.get("session_id")
+        if not sid:
+            await post(f"/agent/{name}/notify", {"text": "/context: нет активной сессии"})
+        else:
+            out, _sid = await run_claude(project, "/context", cmd.get("model"), sid, name)
+            await post(f"/agent/{name}/notify", {"text": "📐 /context\n" + (out or "(пусто)")})
+
     elif t == "coordinate":
         await _coordinate(cmd.get("text", ""), cmd.get("agents", []), cmd.get("machines", []))
 
