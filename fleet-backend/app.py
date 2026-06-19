@@ -339,7 +339,7 @@ async def handle_command(text, agent=None):
     elif cmd == "machines":
         await cmd_machines()
     elif cmd == "status":
-        await cmd_status(args)
+        await cmd_status(args, agent)
     elif cmd in ("kill", "restart", "new", "stop", "compact"):
         await cmd_agent_op(cmd, args, agent)
     elif cmd == "usage":
@@ -451,10 +451,14 @@ async def cmd_machines():
     await reply(None, "Машины:\n" + "\n".join(_line(r) for r in rows))
 
 
-async def cmd_status(args):
-    if not args:
-        return await reply(None, "usage: /status <agent>")
-    a = db.get_agent(args[0])
+async def cmd_status(args, agent=None):
+    # In an agent's own topic, bare `/status` resolves to that topic's agent (no name needed) —
+    # same convenience as /compact, /restart etc. In General you must name the agent.
+    a = agent
+    if a is None:
+        if not args:
+            return await reply(None, "usage: /status <agent>")
+        a = db.get_agent(args[0])
     if not a:
         return await reply(None, "нет такого агента")
     await reply(a["topic_id"], f"{a['name']}: {a['status']} · {a['mode']} · {a['model'] or 'default'} · "
