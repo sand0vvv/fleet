@@ -19,7 +19,9 @@ services:
       - docker-claude:/root/.claude
       # persist runner delivery cursors + logs (the exactly-once dedup must survive restarts).
       - docker-state:/app/runner/.fleet
-    restart: unless-stopped
+    # on-failure = self-heals a crash, but does NOT auto-start on PC reboot and respects a manual stop.
+    # So Docker runs ONLY when the owner starts it (docker-start.bat) — "not always on".
+    restart: on-failure
 
 volumes:
   docker-claude:
