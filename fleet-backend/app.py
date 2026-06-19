@@ -304,7 +304,7 @@ async def tg_update(req: Request):
 # ─────────────────────────────────────────────────────────────────────────────
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
-KNOWN_COMMANDS = {"spawn", "list", "machines", "status", "kill", "restart", "mode", "model",
+KNOWN_COMMANDS = {"spawn", "list", "machines", "status", "context", "kill", "restart", "mode", "model",
                   "rename", "sessions", "use", "new", "stop", "compact", "usage", "help", "create", "backend"}
 
 
@@ -334,6 +334,8 @@ async def handle_command(text, agent=None):
         await cmd_machines()
     elif cmd == "status":
         await cmd_status(args)
+    elif cmd == "context":
+        await cmd_context(args, agent)
     elif cmd in ("kill", "restart", "new", "stop", "compact"):
         await cmd_agent_op(cmd, args, agent)
     elif cmd == "usage":
@@ -458,6 +460,24 @@ async def cmd_status(args):
                                  "project_path": a["project_path"], "session_id": a["session_id"]})
 
 
+async def cmd_context(args, agent=None):
+    """Native Claude Code /context — real context-window breakdown of the agent's session.
+    Bare /context in the agent's topic resolves to that agent; in General name it."""
+    a = agent
+    if a is None:
+        if not args:
+            return await reply(None, "usage: /context <agent>")
+        a = db.get_agent(args[0])
+    if not a:
+        return await reply(None, "нет такого агента")
+    if not a.get("session_id"):
+        return await reply(a["topic_id"], "у агента ещё нет сессии — нечего мерить")
+    machine = _machine_of(a)
+    await manager.push(machine, {"type": "context", "agent": a["name"],
+                                 "project_path": a["project_path"], "session_id": a["session_id"],
+                                 "model": a["model"]})
+
+
 async def cmd_coordinate(text):
     machines = manager.machines()
     if not machines:
@@ -564,7 +584,7 @@ async def cmd_rename(args, agent):
 
 
 def _help_text():
-    return ("Команды:\n/spawn <machine> <path> [headless|cli] [model]\n/list · /machines · /status <a>\n"
+    return ("Команды:\n/spawn <machine> <path> [headless|cli] [model]\n/list · /machines · /status <a> · /context <a>\n"
             "/kill <a> · /restart <a> · /mode <a> <m> · /model <a> <m> · /rename <a> <title>\n"
             "/sessions <a> · /use <a> <id> · /new · /stop · /compact\n/usage (только в General)")
 

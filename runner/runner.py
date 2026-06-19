@@ -432,6 +432,27 @@ async def _coordinate(text, agents, machines):
     await post("/coordinate_reply", {"text": res or "(нет ответа)"})
 
 
+async def _native_compact(project, sid, model, name):
+    """Claude Code's REAL /compact (built-in, dispatchable in -p) on the live session — same as the
+    interactive /compact: it summarizes in-place and KEEPS the session. Returns (ok, session_id).
+    Sending '/compact' as the -p prompt makes Claude Code expand it before running (per docs)."""
+    cfg = _write_mcp_config(project, name)
+    args = ["-p", "--output-format", "json", "--dangerously-skip-permissions",
+            "--mcp-config", cfg, "--resume", sid]
+    if model:
+        args += ["--model", model]
+    raw, rc, err = await _exec(args, project, "/compact")
+    if rc != 0:
+        log.error(f"native /compact exit={rc} stderr={err[:200]}")
+        return False, sid
+    try:
+        data = json.loads(raw)
+    except Exception:
+        log.error(f"native /compact non-json: {raw[:150]!r}")
+        return False, sid
+    return True, data.get("session_id", sid)
+
+
 async def handle(cmd):
     t = cmd.get("type")
     name = cmd.get("agent")
@@ -478,13 +499,23 @@ async def handle(cmd):
             await _ack(name, mid)
 
     elif t == "compact":
-        # slash commands don't run in -p, so do a "soft compact": summarize -> fresh session.
-        # cli: close the window first, then restart it on the compacted session.
+        # Headless: Claude Code's NATIVE /compact (built-in, dispatchable in -p) — keeps the session.
+        # Falls back to the soft compact (summarize -> fresh session) if it fails. cli: soft compact.
         sid = cmd.get("session_id")
         if not sid:
             await post(f"/agent/{name}/notify", {"text": "compact: нет активной сессии"})
             return
         is_cli = cmd.get("mode") == "cli"
+        if not is_cli:
+            ok, newsid = await _native_compact(project, sid, cmd.get("model"), name)
+            if ok:
+                await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
+                tok = _session_tokens(project, newsid)
+                extra = f" Сейчас ~{tok // 1000}k токенов." if tok else ""
+                await post(f"/agent/{name}/notify",
+                           {"text": f"🗜 контекст сжат нативным /compact (как в Claude Code).{extra}"})
+                return
+            await post(f"/agent/{name}/notify", {"text": "native /compact не сработал — делаю мягкое сжатие…"})
         if is_cli:
             await post(f"/agent/{name}/notify", {"text": "🗜 сжимаю: закрываю окно → резюме → рестарт на свежей сессии…"})
             pp = _cli_procs.pop(name, None)
@@ -507,6 +538,15 @@ async def handle(cmd):
         else:
             await post(f"/agent/{name}/session", {"session_id": newsid, "status": "idle"})
             await post(f"/agent/{name}/notify", {"text": f"🗜 контекст сжат в новую сессию.\n\n{summary[:600]}"})
+
+    elif t == "context":
+        # native Claude Code /context — dispatchable in -p; returns the real context-window breakdown
+        sid = cmd.get("session_id")
+        if not sid:
+            await post(f"/agent/{name}/notify", {"text": "/context: нет активной сессии"})
+        else:
+            out, _sid = await run_claude(project, "/context", cmd.get("model"), sid, name)
+            await post(f"/agent/{name}/notify", {"text": "📐 /context\n" + (out or "(пусто)")})
 
     elif t == "usage_all":
         await post("/usage_report", {"text": _usage_panel()})
