@@ -1,0 +1,21 @@
+# Docker — WSL2 variant (docker engine inside WSL Ubuntu, NOT Docker Desktop).
+# Same as docker-compose.docker.yml but the workspace host path is the WSL view of C:\operator.
+# Run from WSL:  sudo docker compose -f docker-compose.docker.wsl.yml up -d --build
+services:
+  docker-runner:
+    build:
+      context: .
+      dockerfile: runner/Dockerfile
+    container_name: docker-runner
+    env_file:
+      - runner/.env.docker
+    volumes:
+      # the operator's working dir — THE ONLY host folder visible inside. C:\operator == /mnt/c/operator in WSL.
+      - "/mnt/c/operator:/workspace"
+      - docker-claude:/root/.claude        # persist Claude login + sessions
+      - docker-state:/app/runner/.fleet    # persist delivery cursors (dedup must survive restarts)
+    restart: on-failure
+
+volumes:
+  docker-claude:
+  docker-state:

@@ -1,0 +1,17 @@
+# keep the Docker image lean + never bake secrets/junk into it
+.git
+**/node_modules
+**/.fleet
+**/__pycache__
+*.log
+**/*.log
+.venv
+venv
+.ruff_cache
+.pytest_cache
+**/.inbox
+**/.outbox
+**/.env
+**/.env.*
+!**/.env.docker.example
+.claude

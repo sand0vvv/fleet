@@ -10,7 +10,7 @@ services:
       dockerfile: runner/Dockerfile
     container_name: docker-runner
     env_file:
-      - runner/.env            # copy runner/.env.docker.example -> runner/.env and fill (Docker backend + secret)
+      - runner/.env.docker     # copy runner/.env.docker.example -> runner/.env.docker and fill (Docker backend + secret)
     volumes:
       # the operator's working dir. THE ONLY host folder visible inside. Agents /spawn into /workspace.
       # Change the left side only if you move the folder; keep the right side /workspace.
