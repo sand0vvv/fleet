@@ -38,18 +38,16 @@ Env:
 - `SUPERGROUP_CHAT_ID` = можно не задавать (бэкенд узнает из первого апдейта владельца), либо вписать id группы
 - `GROQ_API_KEY` = опц. (голос→текст; без него голос не нужен)
 
-## 4. Receiver Docker на Railway (ветка `operator`, папка `receiver/`)
-Env:
-- `FLEET_BACKEND_URL` = URL бэкенда из шага 3
-- `FLEET_TOKEN` = тот же `RUNNER_SECRET` (бэкенд проверяет `x-fleet-token` на `/tg/update`)
-- `TELEGRAM_WEBHOOK_SECRET` = опц. (если задашь — поставь тем же значением в setWebhook)
-
-Вебхук бота Docker → на receiver:
+## 4. Вебхук БЕЗ receiver (вариант «б» — выбран владельцем)
+Receiver НЕ поднимаем. Вебхук бота Docker бьёт ПРЯМО в бэкенд `/tg/update`. Чтобы при этом остался auth,
+бэкенд принимает родной телеграмовский `secret_token` (правка `auth_mw`).
+1. В env бэкенда (шаг 3) добавить: `TELEGRAM_WEBHOOK_SECRET` = придумать строку.
+2. Поставить вебхук с тем же секретом:
 ```
-https://api.telegram.org/bot<DOCKER_TOKEN>/setWebhook?url=https://<docker-receiver>.up.railway.app/webhook/telegram
+https://api.telegram.org/bot<DOCKER_TOKEN>/setWebhook?url=https://<docker-backend>.up.railway.app/tg/update&secret_token=<TELEGRAM_WEBHOOK_SECRET>
 ```
-⚠️ Известная засада ([[fleet-webhook-fix]]): если receiver засыпает — Telegram-вебхук таймаутит.
-Держать receiver тёплым (трафик/план) ИЛИ как фолбэк указать вебхук прямо на бэкенд `/tg/update`.
+Бэкенд деплоится с автосна Railway? Если сервис засыпает — вебхук таймаутит ([[fleet-webhook-fix]]):
+держать сервис тёплым (план/трафик). Receiver-папку игнорируем.
 
 ## 5. Runner в контейнере (комп владельца)
 1. `git checkout operator` в папке fleet.

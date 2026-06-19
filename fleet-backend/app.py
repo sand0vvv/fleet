@@ -48,7 +48,13 @@ async def auth_mw(request: Request, call_next):
         protected = path.startswith("/agent/") or path in (
             "/usage_report", "/coordinate_result", "/coordinate_reply", "/fleet/command", "/tg/update")
         if protected and not _ok_token(request.headers.get("x-fleet-token")):
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
+            # Receiver-less webhook: Telegram can't send x-fleet-token, but it CAN send its own
+            # secret_token header (set via setWebhook). Accept that on /tg/update as an alternative,
+            # so the bot can point straight at the backend with NO separate receiver service.
+            tg_secret = request.headers.get("x-telegram-bot-api-secret-token") or ""
+            if not (path == "/tg/update" and config.TELEGRAM_WEBHOOK_SECRET
+                    and hmac.compare_digest(tg_secret, config.TELEGRAM_WEBHOOK_SECRET)):
+                return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
     return await call_next(request)
 
 

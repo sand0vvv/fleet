@@ -18,6 +18,9 @@ OWNER_TG_ID = next(iter(OWNER_TG_IDS), 0)   # back-compat: primary/first id
 RUNNER_SECRET = os.environ.get("RUNNER_SECRET", "")
 # Supergroup chat id (negative number). If empty, backend learns it from the first owner update.
 SUPERGROUP_CHAT_ID = os.environ.get("SUPERGROUP_CHAT_ID", "")
+# Telegram webhook secret_token (set via setWebhook). Lets the bot's webhook hit /tg/update DIRECTLY
+# (no separate receiver service) while keeping auth on — see auth_mw. Empty = direct webhook needs auth off.
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 # Voice transcription. If GROQ_API_KEY is set -> Groq API (no RAM, fast, recommended).
 # Else local faster-whisper (heavy; can OOM small containers).
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
