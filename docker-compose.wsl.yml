@@ -14,7 +14,7 @@ services:
       - "/mnt/c/operator:/workspace"
       - docker-claude:/root/.claude        # persist Claude login + sessions
       - docker-state:/app/runner/.fleet    # persist delivery cursors (dedup must survive restarts)
-    restart: on-failure
+    restart: always
 
 volumes:
   docker-claude:
