@@ -68,15 +68,16 @@ def get_machine(name):
 
 
 # ---- agents ----
-def create_agent(name, machine_id, project_path, mode, model, topic_id):
+def create_agent(name, machine_id, project_path, mode, model, topic_id, engine="claude"):
     return q(
-        """INSERT INTO fleet.agents (name, machine_id, project_path, mode, model, topic_id, status)
-           VALUES (%s,%s,%s,%s,%s,%s,'idle')
+        """INSERT INTO fleet.agents (name, machine_id, project_path, mode, model, topic_id, engine, status)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,'idle')
            ON CONFLICT (name) DO UPDATE
              SET machine_id=EXCLUDED.machine_id, project_path=EXCLUDED.project_path,
-                 mode=EXCLUDED.mode, model=EXCLUDED.model, topic_id=EXCLUDED.topic_id
+                 mode=EXCLUDED.mode, model=EXCLUDED.model, topic_id=EXCLUDED.topic_id,
+                 engine=EXCLUDED.engine
            RETURNING *""",
-        (name, machine_id, project_path, mode, model, topic_id), fetch="one")
+        (name, machine_id, project_path, mode, model, topic_id, engine), fetch="one")
 
 
 def get_agent(name):

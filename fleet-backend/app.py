@@ -154,6 +154,7 @@ async def _deliver(a, text, files, mid):
     machine = _machine_of(a)
     pushed = await manager.push(machine, {
         "type": "deliver", "agent": name, "mode": a["mode"], "model": a["model"],
+        "engine": a.get("engine", "claude"),
         "project_path": a["project_path"], "session_id": a["session_id"],
         "text": text, "files": files, "mid": mid,
     })
@@ -305,7 +306,8 @@ async def tg_update(req: Request):
 # Commands
 # ─────────────────────────────────────────────────────────────────────────────
 KNOWN_COMMANDS = {"spawn", "list", "machines", "status", "context", "kill", "restart", "mode", "model",
-                  "rename", "sessions", "use", "new", "stop", "compact", "usage", "help", "create", "backend"}
+                  "engine", "rename", "sessions", "use", "new", "stop", "compact", "usage", "help",
+                  "create", "backend"}
 
 
 def _command_of(text):
@@ -351,6 +353,8 @@ async def handle_command(text, agent=None):
         await cmd_set(args, "mode")
     elif cmd == "model":
         await cmd_set(args, "model")
+    elif cmd == "engine":
+        await cmd_set(args, "engine")
     elif cmd == "rename":
         await cmd_rename(args, agent)
     elif cmd == "create":
@@ -397,25 +401,37 @@ async def cmd_create(args):
 
 async def cmd_spawn(args):
     if len(args) < 2:
-        return await reply(None, "usage: /spawn <machine> <project_path> [headless|cli] [model]")
+        return await reply(None, "usage: /spawn <machine> <project_path> [headless|cli] [model] [claude|claudex]")
     machine, path = args[0], args[1]
-    mode = args[2] if len(args) > 2 else "headless"
-    model = args[3] if len(args) > 3 else None
+    # flexible parse: mode/engine tokens recognised by value, anything else = model (order-independent)
+    mode, model, engine = "headless", None, "claude"
+    for tok in args[2:]:
+        low = tok.lower()
+        if low in ("headless", "cli"):
+            mode = low
+        elif low in ("claude", "claudex", "codex"):
+            engine = "claudex" if low in ("claudex", "codex") else "claude"
+        else:
+            model = tok
     m = db.get_machine(machine)
     if not m:
         return await reply(None, f"машина '{machine}' не зарегистрирована (runner не подключался)")
     # presence-aware: a registered-but-offline machine can't receive the spawn push — fail-closed
     if not manager.is_online(machine):
         return await reply(None, f"машина '{machine}' оффлайн (runner не на связи) — подними runner и повтори")
-    name = util.agent_name_from_path(path) or machine
+    base = util.agent_name_from_path(path) or machine
+    # engine = its own agent/topic so claude & codex of the same folder coexist: poly + poly (codex)
+    name = f"{base}-codex" if engine == "claudex" else base
+    title = f"{base} (codex)" if engine == "claudex" else base
     if not SUPERGROUP:
         return await reply(None, "не знаю chat_id супергруппы — напиши что-нибудь в группе")
-    topic_id = await tg.create_forum_topic(SUPERGROUP, name)
-    db.create_agent(name, m["id"], path, mode, model, topic_id)
+    topic_id = await tg.create_forum_topic(SUPERGROUP, title)
+    db.create_agent(name, m["id"], path, mode, model, topic_id, engine)
     await manager.push(machine, {"type": "spawn", "agent": name, "mode": mode,
-                                 "model": model, "project_path": path})
-    log(f"spawned {name} on {machine} topic={topic_id}")
-    await reply(topic_id, f"🟢 {name} ({mode}) поднят на {machine}")
+                                 "model": model, "project_path": path, "engine": engine})
+    log(f"spawned {name} on {machine} topic={topic_id} engine={engine}")
+    eng = " · claudex" if engine == "claudex" else ""
+    await reply(topic_id, f"🟢 {name} ({mode}{eng}) поднят на {machine}")
 
 
 async def cmd_list():
@@ -423,7 +439,8 @@ async def cmd_list():
     if not rows:
         return await reply(None, "агентов нет")
     await reply(None, "Агенты:\n" + "\n".join(
-        f"• {r['name']} — {r['machine_name'] or '?'} · {r['mode']} · {r['model'] or 'default'} · {r['status']}"
+        f"• {r['name']} — {r['machine_name'] or '?'} · {r['mode']}"
+        f"{' · claudex' if r.get('engine') == 'claudex' else ''} · {r['model'] or 'default'} · {r['status']}"
         for r in rows))
 
 
@@ -453,10 +470,11 @@ async def cmd_status(args):
     a = db.get_agent(args[0])
     if not a:
         return await reply(None, "нет такого агента")
-    await reply(a["topic_id"], f"{a['name']}: {a['status']} · {a['mode']} · {a['model'] or 'default'} · "
+    eng = a.get("engine", "claude")
+    await reply(a["topic_id"], f"{a['name']}: {a['status']} · {a['mode']} · {eng} · {a['model'] or 'default'} · "
                                f"session={a['session_id'] or '—'}")
     machine = _machine_of(a)
-    await manager.push(machine, {"type": "status", "agent": a["name"],
+    await manager.push(machine, {"type": "status", "agent": a["name"], "engine": eng,
                                  "project_path": a["project_path"], "session_id": a["session_id"]})
 
 
@@ -546,7 +564,7 @@ async def cmd_agent_op(op, args, agent):
     elif op == "restart":
         await manager.push(machine, {"type": "restart", "agent": agent["name"],
                                      "mode": agent["mode"], "project_path": agent["project_path"],
-                                     "model": agent["model"]})
+                                     "model": agent["model"], "engine": agent.get("engine", "claude")})
         await reply(agent["topic_id"], f"♻️ {agent['name']} перезапуск")
     elif op == "new":
         db.update_agent(agent["name"], session_id="")  # "" = force fresh (not attach)
@@ -555,7 +573,7 @@ async def cmd_agent_op(op, args, agent):
         await manager.push(machine, {"type": op, "agent": agent["name"], "mode": agent["mode"],
                                      "project_path": agent["project_path"],
                                      "session_id": agent["session_id"],
-                                     "model": agent["model"]})
+                                     "model": agent["model"], "engine": agent.get("engine", "claude")})
 
 
 async def cmd_set(args, field):
@@ -584,9 +602,10 @@ async def cmd_rename(args, agent):
 
 
 def _help_text():
-    return ("Команды:\n/spawn <machine> <path> [headless|cli] [model]\n/list · /machines · /status <a> · /context <a>\n"
-            "/kill <a> · /restart <a> · /mode <a> <m> · /model <a> <m> · /rename <a> <title>\n"
-            "/sessions <a> · /use <a> <id> · /new · /stop · /compact\n/usage (только в General)")
+    return ("Команды:\n/spawn <machine> <path> [headless|cli] [model] [claude|claudex]\n"
+            "/list · /machines · /status <a> · /context <a>\n"
+            "/kill <a> · /restart <a> · /mode <a> <m> · /model <a> <m> · /engine <a> <claude|claudex>\n"
+            "/rename <a> <title> · /sessions <a> · /use <a> <id> · /new · /stop · /compact\n/usage (только в General)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

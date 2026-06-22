@@ -43,6 +43,10 @@ TOKEN = os.environ.get("RUNNER_TOKEN", "dev")
 # "dev" = --dangerously-load-development-channels (required for server: MCP channels; prompts, we auto-Enter).
 # "channels" = --channels (approved path) — does NOT work for server: channels, kept only as override.
 CHANNEL_MODE = os.environ.get("FLEET_CHANNEL_MODE", "dev")
+# Engines: claude (Claude Code, default) | claudex (Codex fork with native channels + reskin).
+# claudex.exe may not be on PATH -> set CLAUDEX_BIN to its absolute path in the runner .env.
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+CLAUDEX_BIN = os.environ.get("CLAUDEX_BIN", "claudex")
 
 _agent_locks = {}  # serialize claude runs per agent (one session at a time)
 _cli_procs = {}    # name -> Popen (cli-mode visible windows)
@@ -212,8 +216,71 @@ def _unregister_project_mcp(project):
         pass
 
 
-def _spawn_cli(name, project, model, session_id=None):
-    """Launch a visible interactive claude window (cli mode) with channel injection."""
+def _codex_home(project):
+    """Per-agent CODEX_HOME (where codex/claudex reads config.toml + auth)."""
+    return os.path.join(project, ".codex")
+
+
+def _register_codex_mcp(project, name, mode):
+    """Codex/claudex configures MCP via config.toml in CODEX_HOME (NOT Claude's .mcp.json).
+    Write a per-agent CODEX_HOME with the fleet MCP server, and carry the user's codex login
+    so the spawned agent is authenticated."""
+    home = _codex_home(project)
+    pathlib.Path(home).mkdir(parents=True, exist_ok=True)
+    server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
+
+    def _esc(s):
+        return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+    lines = ["[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
+             "[mcp_servers.fleet.env]",
+             f'FLEET_BACKEND_HTTP = "{_esc(BACKEND_HTTP)}"',
+             f'FLEET_AGENT_NAME = "{_esc(name)}"',
+             f'FLEET_TOKEN = "{_esc(TOKEN)}"']
+    if mode == "cli":
+        base_ws = BACKEND_WS.replace("/ws/runner", "")
+        stream = (f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
+                  f"?token={urllib.parse.quote(TOKEN)}")
+        lines += ['FLEET_MODE = "cli"', f'FLEET_STREAM_WS = "{_esc(stream)}"']
+    with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    # carry codex login (auth.json) from the real ~/.codex once, so the agent isn't logged out
+    real = os.path.join(os.path.expanduser("~"), ".codex", "auth.json")
+    dest = os.path.join(home, "auth.json")
+    try:
+        if os.path.exists(real) and not os.path.exists(dest):
+            import shutil
+            shutil.copyfile(real, dest)
+    except Exception as e:
+        log.error(f"codex auth copy failed: {e}")
+
+
+def _spawn_cli_codex(name, project, model, session_id=None):
+    """Launch a visible claudex (Codex fork) window with native channels. MCP via CODEX_HOME/config.toml.
+    No dev-channels safety prompt -> no auto-Enter hack. (Session resume in cli is a later step.)"""
+    _register_codex_mcp(project, name, "cli")
+    env = dict(os.environ, CODEX_HOME=_codex_home(project))
+    parts = [CLAUDEX_BIN, "--channels", "fleet", "--dangerously-bypass-approvals-and-sandbox"]
+    if model:
+        parts += ["-m", model]
+    if os.name == "nt":
+        def _q(a):
+            return f'"{a}"' if " " in a else a
+        full = "cmd /k " + " ".join(_q(a) for a in parts)
+        log.info(f"cli(codex) launch: {full}")
+        proc = subprocess.Popen(full, cwd=project, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    else:
+        proc = subprocess.Popen(parts, cwd=project, env=env)
+    _cli_procs[name] = proc
+    _cli_meta[name] = {"project": project, "model": model, "engine": "claudex"}
+    log.info(f"cli(codex) spawned {name} pid={proc.pid}")
+    return proc.pid
+
+
+def _spawn_cli(name, project, model, session_id=None, engine="claude"):
+    """Launch a visible interactive agent window (cli mode) with channel injection."""
+    if engine == "claudex":
+        return _spawn_cli_codex(name, project, model, session_id)
     _register_project_mcp(project, name, "cli")
     rule_path = os.path.join(project, ".fleet", "rule.txt")
     pathlib.Path(os.path.join(project, ".fleet")).mkdir(parents=True, exist_ok=True)
@@ -242,7 +309,7 @@ def _spawn_cli(name, project, model, session_id=None):
     else:
         proc = subprocess.Popen(parts, cwd=project)
     _cli_procs[name] = proc
-    _cli_meta[name] = {"project": project, "model": model}   # remember for watchdog auto-restart
+    _cli_meta[name] = {"project": project, "model": model, "engine": "claude"}  # for watchdog restart
     log.info(f"cli spawned {name} pid={proc.pid}")
     # The dev-channels safety prompt can't be disabled via flags/settings, so auto-press
     # Enter (confirms option 1) ~3s after the window opens, while it still has focus.
@@ -462,11 +529,19 @@ async def handle(cmd):
     if t == "spawn":
         if project:
             pathlib.Path(os.path.join(project, ".inbox")).mkdir(parents=True, exist_ok=True)
-        if cmd.get("mode") == "cli":
+        engine = (cmd.get("engine") or "claude").lower()
+        if engine == "claudex" and cmd.get("mode") != "cli":
+            # claudex headless (codex exec) is the next step — only cli is wired for now. Fail honest.
+            await post(f"/agent/{name}/notify",
+                       {"text": "⚠️ claudex пока работает только в cli-режиме. "
+                                "Пересоздай: /spawn <машина> <путь> cli claudex (headless для codex — следующим шагом)."})
+        elif cmd.get("mode") == "cli":
             try:
-                pid = _spawn_cli(name, project, cmd.get("model"))
-                asyncio.create_task(_detect_cli_session(name, project))
-                await post(f"/agent/{name}/notify", {"text": f"🟢 {name} (cli) — окно открыто, pid {pid}"})
+                pid = _spawn_cli(name, project, cmd.get("model"), engine=engine)
+                if engine != "claudex":
+                    asyncio.create_task(_detect_cli_session(name, project))
+                tag = "cli·claudex" if engine == "claudex" else "cli"
+                await post(f"/agent/{name}/notify", {"text": f"🟢 {name} ({tag}) — окно открыто, pid {pid}"})
             except Exception as e:
                 log.error(f"cli spawn failed: {e}")
                 await post(f"/agent/{name}/notify", {"text": f"cli spawn ошибка: {e}"})
@@ -476,6 +551,16 @@ async def handle(cmd):
     elif t == "deliver":
         if cmd.get("mode") == "cli":
             return  # cli messages delivered via backend stream to fleet-mcp, not here
+        if (cmd.get("engine") or "claude").lower() == "claudex":
+            # claudex headless (codex exec) not wired yet -> don't run it through the claude binary
+            mid = cmd.get("mid") or 0
+            await post(f"/agent/{name}/notify",
+                       {"text": "⚠️ claudex пока только cli. Переключи: /mode <агент> cli и /restart, "
+                                "либо подожди headless-codex (следующий шаг)."})
+            if mid:
+                _set_hw(name, mid)
+                await _ack(name, mid)
+            return
         mid = cmd.get("mid") or 0
         if mid and mid <= _hw(name):
             await _ack(name, mid)   # already processed — just advance backend cursor (no duplicate)
@@ -501,6 +586,10 @@ async def handle(cmd):
     elif t == "compact":
         # Headless: Claude Code's NATIVE /compact (built-in, dispatchable in -p) — keeps the session.
         # Falls back to the soft compact (summarize -> fresh session) if it fails. cli: soft compact.
+        if (cmd.get("engine") or "claude").lower() == "claudex":
+            await post(f"/agent/{name}/notify",
+                       {"text": "🗜 /compact для claudex пока не поддерживается (у codex другой формат сессий) — следующим шагом."})
+            return
         sid = cmd.get("session_id")
         if not sid:
             await post(f"/agent/{name}/notify", {"text": "compact: нет активной сессии"})
@@ -541,6 +630,10 @@ async def handle(cmd):
 
     elif t == "context":
         # native Claude Code /context — dispatchable in -p; returns the real context-window breakdown
+        if (cmd.get("engine") or "claude").lower() == "claudex":
+            await post(f"/agent/{name}/notify",
+                       {"text": "📐 /context для claudex пока не поддерживается (другой формат сессий codex) — скоро."})
+            return
         sid = cmd.get("session_id")
         if not sid:
             await post(f"/agent/{name}/notify", {"text": "/context: нет активной сессии"})
@@ -584,8 +677,10 @@ async def handle(cmd):
             _unregister_project_mcp(cmd["project_path"])
         if t == "restart" and cmd.get("mode") == "cli" and cmd.get("project_path"):
             try:
-                pid = _spawn_cli(name, cmd["project_path"], cmd.get("model"))
-                asyncio.create_task(_detect_cli_session(name, cmd["project_path"]))
+                engine = (cmd.get("engine") or "claude").lower()
+                pid = _spawn_cli(name, cmd["project_path"], cmd.get("model"), engine=engine)
+                if engine != "claudex":
+                    asyncio.create_task(_detect_cli_session(name, cmd["project_path"]))
                 await post(f"/agent/{name}/notify", {"text": f"♻️ {name} (cli) перезапущен, pid {pid}"})
             except Exception as e:
                 await post(f"/agent/{name}/notify", {"text": f"restart ошибка: {e}"})
@@ -633,8 +728,10 @@ async def monitor():
                            {"text": f"🛑 «{n}» крашится в цикле ({len(times)}× за 5 мин) — авто-рестарт остановлен. Разберись, потом /restart {n}."})
             else:
                 try:
-                    pid = _spawn_cli(n, meta["project"], meta.get("model"))
-                    asyncio.create_task(_detect_cli_session(n, meta["project"]))
+                    eng = meta.get("engine", "claude")
+                    pid = _spawn_cli(n, meta["project"], meta.get("model"), engine=eng)
+                    if eng != "claudex":
+                        asyncio.create_task(_detect_cli_session(n, meta["project"]))
                     times.append(now)
                     _restart_times[n] = times
                     await post(f"/agent/{n}/notify",
