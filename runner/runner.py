@@ -232,9 +232,7 @@ def _register_codex_mcp(project, name, mode):
     def _esc(s):
         return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
-    # Top-level keys first (TOML requires them before any [table]); belt-and-suspenders no-sandbox/no-ask.
-    lines = ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"', "",
-             "[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
+    lines = ["[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
              "[mcp_servers.fleet.env]",
              f'FLEET_BACKEND_HTTP = "{_esc(BACKEND_HTTP)}"',
              f'FLEET_AGENT_NAME = "{_esc(name)}"',
@@ -262,9 +260,7 @@ def _spawn_cli_codex(name, project, model, session_id=None):
     No dev-channels safety prompt -> no auto-Enter hack. (Session resume in cli is a later step.)"""
     _register_codex_mcp(project, name, "cli")
     env = dict(os.environ, CODEX_HOME=_codex_home(project))
-    # Full bypass: no sandbox, no approval prompts (owner wants Claude-Code-style bypass-permissions).
-    # --yolo still keeps a workspace-write sandbox; this flag drops the sandbox entirely.
-    parts = [CLAUDEX_BIN, "--channels", "fleet", "--dangerously-bypass-approvals-and-sandbox"]
+    parts = [CLAUDEX_BIN, "--channels", "fleet", "--yolo"]  # owner: yolo only, nothing else
     if model:
         parts += ["-m", model]
     if os.name == "nt":
