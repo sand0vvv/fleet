@@ -5,3 +5,7 @@ builder = "dockerfile"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "always"
+# MUST stay 1: the WS manager keeps runner connections IN MEMORY (per process). With >1 replica the
+# runner's WS sticks to instance A while HTTP (/tg/update, /fleet/command) load-balances to instance B
+# whose _conns is empty -> commands silently never reach the runner. Pinning to 1 is the real fix.
+numReplicas = 1
