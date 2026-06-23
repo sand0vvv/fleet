@@ -232,7 +232,10 @@ def _register_codex_mcp(project, name, mode):
     def _esc(s):
         return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
-    lines = ["[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
+    # No sandbox, never ask — THIS is what actually kills the sandbox (--yolo alone keeps it).
+    # Top-level keys must come before any [table]. (Proven on the owner's own ~/.codex config.)
+    lines = ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"', "",
+             "[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
              "[mcp_servers.fleet.env]",
              f'FLEET_BACKEND_HTTP = "{_esc(BACKEND_HTTP)}"',
              f'FLEET_AGENT_NAME = "{_esc(name)}"',
