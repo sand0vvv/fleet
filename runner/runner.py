@@ -223,19 +223,36 @@ def _codex_home(project):
 
 def _register_codex_mcp(project, name, mode):
     """Codex/claudex configures MCP via config.toml in CODEX_HOME (NOT Claude's .mcp.json).
-    Write a per-agent CODEX_HOME with the fleet MCP server, and carry the user's codex login
-    so the spawned agent is authenticated."""
+    The per-agent CODEX_HOME must be a CLONE of the user's working ~/.codex — otherwise it's a fresh
+    home where the Windows sandbox was never set up, so codex shows the 'Set up the sandbox' screen
+    even with sandbox_mode=danger-full-access. So: seed config from the global one (carries [windows],
+    trust, danger-full-access), append the fleet MCP, and copy the sandbox-setup dirs + login."""
+    import shutil
     home = _codex_home(project)
     pathlib.Path(home).mkdir(parents=True, exist_ok=True)
+    real_home = os.path.join(os.path.expanduser("~"), ".codex")
     server = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fleet-mcp", "index.mjs"))
 
     def _esc(s):
         return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
-    # No sandbox, never ask — THIS is what actually kills the sandbox (--yolo alone keeps it).
-    # Top-level keys must come before any [table]. (Proven on the owner's own ~/.codex config.)
-    lines = ['approval_policy = "never"', 'sandbox_mode = "danger-full-access"', "",
-             "[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
+    # base = the user's working global config (has the Windows sandbox setup state, trust, danger-full-access)
+    base = ""
+    gcfg = os.path.join(real_home, "config.toml")
+    if os.path.exists(gcfg):
+        try:
+            with open(gcfg, encoding="utf-8") as f:
+                base = f.read()
+        except Exception:
+            base = ""
+    # ensure no-sandbox / never even if the global config somehow lacks them (top-level keys go first)
+    head = ""
+    if "approval_policy" not in base:
+        head += 'approval_policy = "never"\n'
+    if "sandbox_mode" not in base:
+        head += 'sandbox_mode = "danger-full-access"\n'
+    # append the fleet MCP (the global config has no [mcp_servers.fleet], so no dup)
+    fleet = ["", "", "[mcp_servers.fleet]", 'command = "node"', f'args = ["{_esc(server)}"]', "",
              "[mcp_servers.fleet.env]",
              f'FLEET_BACKEND_HTTP = "{_esc(BACKEND_HTTP)}"',
              f'FLEET_AGENT_NAME = "{_esc(name)}"',
@@ -244,18 +261,20 @@ def _register_codex_mcp(project, name, mode):
         base_ws = BACKEND_WS.replace("/ws/runner", "")
         stream = (f"{base_ws}/agent/{urllib.parse.quote(name)}/stream"
                   f"?token={urllib.parse.quote(TOKEN)}")
-        lines += ['FLEET_MODE = "cli"', f'FLEET_STREAM_WS = "{_esc(stream)}"']
+        fleet += ['FLEET_MODE = "cli"', f'FLEET_STREAM_WS = "{_esc(stream)}"']
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    # carry codex login (auth.json) from the real ~/.codex once, so the agent isn't logged out
-    real = os.path.join(os.path.expanduser("~"), ".codex", "auth.json")
-    dest = os.path.join(home, "auth.json")
-    try:
-        if os.path.exists(real) and not os.path.exists(dest):
-            import shutil
-            shutil.copyfile(real, dest)
-    except Exception as e:
-        log.error(f"codex auth copy failed: {e}")
+        f.write(head + base + "\n".join(fleet) + "\n")
+    # clone login + the Windows sandbox-setup dirs so codex treats this home as already set up
+    for item in ("auth.json", ".sandbox", ".sandbox-bin", ".sandbox-secrets"):
+        src, dst = os.path.join(real_home, item), os.path.join(home, item)
+        try:
+            if os.path.exists(src) and not os.path.exists(dst):
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copyfile(src, dst)
+        except Exception as e:
+            log.error(f"codex clone {item} failed: {e}")
 
 
 def _spawn_cli_codex(name, project, model, session_id=None):
@@ -263,10 +282,10 @@ def _spawn_cli_codex(name, project, model, session_id=None):
     No dev-channels safety prompt -> no auto-Enter hack. (Session resume in cli is a later step.)"""
     _register_codex_mcp(project, name, "cli")
     env = dict(os.environ, CODEX_HOME=_codex_home(project))
-    # NO --yolo: in this build --yolo forces a workspace sandbox (triggers the Windows sandbox-setup
-    # screen) and OVERRIDES config. Plain launch lets CODEX_HOME/config.toml rule:
-    # sandbox_mode=danger-full-access + approval_policy=never -> zero sandbox, zero prompts.
-    parts = [CLAUDEX_BIN, "--channels", "fleet"]
+    # Mirror the owner's working manual command exactly: `claudex --yolo` (+ our channels). The earlier
+    # sandbox screen came from a FRESH CODEX_HOME (sandbox not set up there), not from --yolo — the
+    # cloned home (see _register_codex_mcp) fixes that.
+    parts = [CLAUDEX_BIN, "--channels", "fleet", "--yolo"]
     if model:
         parts += ["-m", model]
     if os.name == "nt":
