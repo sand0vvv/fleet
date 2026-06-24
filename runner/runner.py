@@ -263,7 +263,10 @@ def _spawn_cli_codex(name, project, model, session_id=None):
     No dev-channels safety prompt -> no auto-Enter hack. (Session resume in cli is a later step.)"""
     _register_codex_mcp(project, name, "cli")
     env = dict(os.environ, CODEX_HOME=_codex_home(project))
-    parts = [CLAUDEX_BIN, "--channels", "fleet", "--yolo"]  # owner: yolo only, nothing else
+    # NO --yolo: in this build --yolo forces a workspace sandbox (triggers the Windows sandbox-setup
+    # screen) and OVERRIDES config. Plain launch lets CODEX_HOME/config.toml rule:
+    # sandbox_mode=danger-full-access + approval_policy=never -> zero sandbox, zero prompts.
+    parts = [CLAUDEX_BIN, "--channels", "fleet"]
     if model:
         parts += ["-m", model]
     if os.name == "nt":
