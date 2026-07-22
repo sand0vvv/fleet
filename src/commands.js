@@ -65,7 +65,7 @@ export function createCommands(deps) {
       case "spawn": return cmdSpawn(args);
       case "list": return cmdList(agent);
       case "status": return cmdStatus(args);
-      case "context": return cmdContext(args, agent);
+      case "context": return cmdNativeRelay("context", args, agent);
       case "kill": return cmdAgentOp("kill", args, agent);
       case "restart": return cmdAgentOp("restart", args, agent);
       case "hide": return cmdHideShow("hide", args, agent);
@@ -78,7 +78,7 @@ export function createCommands(deps) {
       case "use": return cmdUse(args, agent);
       case "mode": return cmdSet(args, "mode");
       case "model": return cmdModel(args, agent);
-      case "usage": return cmdUsage(agent);
+      case "usage": return agent ? cmdNativeRelay("usage", args, agent) : cmdUsage();
       case "rename": return cmdRename(args, agent);
       default: return reply(null, `unknown command: /${cmd}`);
     }
@@ -177,17 +177,33 @@ export function createCommands(deps) {
     await reply(a.topicId, `${a.name}: ${a.status} · ${a.mode} · ${a.model || "default"} · session=${a.sessionId || "-"}\nrunner: ${bits.join(" · ")}`);
   }
 
-  // /context -> show the agent's context size + a "Compact now" button; also push native /context to the window.
-  async function cmdContext(args, agent) {
+  // Strip ANSI/TUI noise from raw pty bytes -> readable lines for Telegram.
+  function stripTui(raw) {
+    return String(raw || "")
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b[=>]/g, "")
+      .replace(/\r/g, "")
+      .split("\n").map((l) => l.replace(/\s+$/, ""));
+  }
+
+  // /context, /usage — the eastside way: forward the NATIVE command into the live pty (the real
+  // Claude answer, correct for ANY model/window size — no made-up 200k math), then capture the
+  // terminal's fresh output and relay it into the topic.
+  async function cmdNativeRelay(op, args, agent) {
     const a = agent || (args.length ? registry.getAgent(args[0]) : null);
-    if (!a) return reply(null, "usage: /context <agent>");
-    const tok = agents.sessionTokens(a.projectPath, a.sessionId || null);
-    const size = tok != null
-      ? `~${Math.floor(tok / 1000)}k tokens (${Math.min(100, Math.round(tok / 2000))}% of 200k)`
-      : "unknown (spawn/talk first)";
-    if (agents.isAlive(a.name)) agents.writeInput(a.name, "/context");
-    await telegram.sendKeyboard(sg(), `${a.name} — context: ${size}`, a.topicId,
-      [[{ text: "Compact now", data: `compact:${a.name}:` }]]);
+    if (!a) return reply(null, `usage: /${op} <agent>`);
+    if ((a.engine || "claude") === "codex")
+      return reply(a.topicId, `codex runs in its own window — type /${op === "usage" ? "status" : op} there`);
+    if (!agents.isAlive(a.name)) return reply(a.topicId, "agent is not running — message it (or /show) first");
+    agents.writeInput(a.name, `/${op}`);
+    setTimeout(async () => {
+      const lines = stripTui(agents.tailOutput(a.name, 8000) || "").filter(Boolean);
+      // keep the informative lines of the /context //usage screen, drop the input-box chrome
+      const meat = lines.filter((l) => !/^[>│╭╰╮╯─]+\s*$/.test(l) && !/\? for shortcuts|Bypassing Permissions/i.test(l)).slice(-25);
+      const text = meat.join("\n").trim();
+      if (text) await telegram.sendKeyboard(sg(), `${a.name} — /${op}:\n\n${text.slice(-3000)}`, a.topicId,
+        [[{ text: "Compact now", data: `compact:${a.name}:` }]]);
+      else await reply(a.topicId, `/${op} sent — see the agent window`);
+    }, 3500);
   }
 
   // /clear, /compact -> native slash command straight into the live pty (with progress for /compact).
@@ -226,17 +242,15 @@ export function createCommands(deps) {
     return reply(a.topicId, `${a.name}: model → ${args[1]} · /restart to apply`);
   }
 
-  // /usage -> in a topic: THAT agent's line into the topic; in General: the whole fleet.
+  // /usage in General -> whole-fleet overview (in a topic it relays the NATIVE /usage instead).
+  // Context size is the raw jsonl estimate with no window-% guess — window size depends on the model.
   function usageLine(r) {
     const tok = agents.sessionTokens(r.projectPath, r.sessionId || null);
     const alive = agents.isAlive(r.name);
-    const ctx = tok != null
-      ? `context ~${Math.floor(tok / 1000)}k tokens (${Math.min(100, Math.round(tok / 2000))}% of 200k)${tok > 150000 ? " — consider /compact" : ""}`
-      : "context unknown (talk to it first)";
+    const ctx = tok != null ? `context ~${Math.floor(tok / 1000)}k tokens` : "context unknown (talk to it first)";
     return `${r.name} · ${r.engine || "claude"} · ${r.model || "default model"} · ${alive ? "running" : r.status} · ${ctx}`;
   }
-  async function cmdUsage(agent) {
-    if (agent) return reply(agent.topicId, usageLine(agent));
+  async function cmdUsage() {
     const rows = registry.listAgents();
     if (!rows.length) return reply(null, "no agents");
     await reply(null, "Fleet usage:\n" + rows.map((r) => "- " + usageLine(r)).join("\n"));

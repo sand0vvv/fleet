@@ -11,7 +11,7 @@
 // ~/.codex, otherwise codex shows the "Set up the sandbox" screen even with sandbox_mode=danger-full-access.
 // So: seed from the global config (carries [windows] trust + danger-full-access), append [mcp_servers.fleet],
 // and copy the login + sandbox-setup dirs.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   writeFileSync,
@@ -114,7 +114,10 @@ export function spawnCodexAgent(agent, env = {}) {
   if (!existsSync(cursorPath)) writeFileSync(cursorPath, JSON.stringify({ hw: 0 }));
 
   // Wire CODEX_HOME/config.toml so codex can call the fleet MCP (send_message).
-  registerCodexMcp(project, { backendHttp, agentName: name, token, streamWs });
+  // NO streamWs here: the per-agent stream belongs to codex-shell (it injects via turn/start).
+  // If the MCP also dials the stream (FLEET_MODE=cli) it REPLACES codex-shell's ws on the runner
+  // and every owner message dies inside the MCP — it can only inject into Claude, not codex.
+  registerCodexMcp(project, { backendHttp, agentName: name, token });
 
   // Env for the codex-shell child: fleet identity + CODEX_HOME so codex loads the per-agent config.
   const childEnv = {
@@ -155,6 +158,10 @@ export function spawnCodexAgent(agent, env = {}) {
     // and taskkill /T /F each — children (codex app-server + codex --remote TUI) die with the tree,
     // and when node exits the hosting cmd window closes. Fallback sweep: anything still referencing
     // this agent's CODEX_HOME (belt and braces for detached codex processes).
+    // SYNCHRONOUS on purpose: /restart does kill()+spawn back-to-back — an async sweep would still
+    // be enumerating processes when the NEW codex tree (same marker, same CODEX_HOME) comes up and
+    // would kill the newborn (seen live: TUI exited 0xC000013A ~4s after respawn). Blocking ~1-2s
+    // on /kill //restart is fine; the sweep is fully done before we return.
     kill: () => {
       try {
         if (process.platform === "win32") {
@@ -166,11 +173,11 @@ export function spawnCodexAgent(agent, env = {}) {
             `foreach ($p in $targets) { taskkill /PID $p.ProcessId /T /F 2>$null };`,
             `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*${homeFwd}*' -or $_.CommandLine -like '*${homeBack}*') } | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null }`,
           ].join(" ");
-          spawn("powershell", ["-NoProfile", "-Command", ps], { stdio: "ignore", detached: true });
+          spawnSync("powershell", ["-NoProfile", "-Command", ps], { stdio: "ignore", timeout: 15000 });
         } else {
           try { child.kill(); } catch {}
           // POSIX: kill by the argv marker (the terminal app survives; the codex processes die)
-          spawn("pkill", ["-f", `--agent ${name}$`], { stdio: "ignore" });
+          spawnSync("pkill", ["-f", `--agent ${name}$`], { stdio: "ignore", timeout: 15000 });
         }
         return true;
       } catch { return false; }

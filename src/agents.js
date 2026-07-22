@@ -200,6 +200,14 @@ export function writeRaw(name, data) {
   try { p.pty.write(typeof data === "string" ? data : data.toString("utf8")); return true; } catch { return false; }
 }
 
+// Last N chars of the agent's scrollback (raw pty bytes incl. ANSI) — used to capture the output
+// of a native command (/context, /usage) so it can be relayed to Telegram.
+export function tailOutput(name, chars = 6000) {
+  const p = procs.get(name);
+  if (!p) return null;
+  return p.buf.join("").slice(-chars);
+}
+
 // Subscribe an attached terminal to the agent's live output. Replays scrollback first,
 // then streams new chunks. Returns an unsubscribe fn. onData receives raw pty bytes (string).
 export function subscribeOutput(name, onData) {
