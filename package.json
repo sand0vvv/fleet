@@ -1,6 +1,6 @@
 {
-  "name": "@fleet/runner",
-  "version": "0.1.0",
+  "name": "@sand0vvv/fleet",
+  "version": "0.4.0",
   "description": "Run a fleet of AI coding agents (Claude Code / Codex) from your phone, in one Telegram supergroup. Self-hosted, local, no account.",
   "type": "module",
   "bin": {
@@ -10,10 +10,34 @@
     "src",
     "mcp",
     "codex-shell",
+    "assets",
     "README.md"
   ],
   "scripts": {
     "start": "node src/cli.js start"
+  },
+  "keywords": [
+    "telegram",
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "agent",
+    "cli",
+    "self-hosted",
+    "remote-control",
+    "mcp"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sand0vvv/fleet.git"
+  },
+  "homepage": "https://github.com/sand0vvv/fleet#readme",
+  "bugs": {
+    "url": "https://github.com/sand0vvv/fleet/issues"
+  },
+  "author": "sand0vvv",
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
