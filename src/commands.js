@@ -185,7 +185,7 @@ export function createCommands(deps) {
       .split("\n").map((l) => l.replace(/\s+$/, ""));
   }
 
-  // /context, /usage — the eastside way: forward the NATIVE command into the live pty (the real
+  // /context, /usage — forward the NATIVE command into the live pty (the real
   // Claude answer, correct for ANY model/window size — no made-up 200k math), then capture the
   // terminal's fresh output and relay it into the topic.
   async function cmdNativeRelay(op, args, agent) {
