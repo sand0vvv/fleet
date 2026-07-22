@@ -275,7 +275,9 @@ export function createCommands(deps) {
       }
     }
     if (op === "new") {
-      registry.updateAgent(a.name, { sessionId: "" }); // "" = force fresh on next restart
+      // freshNext beats the --continue fallback: without it a wake would resume the newest
+      // folder session anyway and /new would silently do nothing.
+      registry.updateAgent(a.name, { sessionId: "", freshNext: true });
       return reply(a.topicId, "new session armed (resume cleared) — /restart to apply");
     }
     // stop

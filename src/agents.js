@@ -128,7 +128,12 @@ export function spawnAgent(agent, opts = {}) {
     const chan = channelMode === "dev"
       ? "--dangerously-load-development-channels server:fleet"
       : "--channels server:fleet";
-    const resume = agent.sessionId ? ` --resume ${agent.sessionId}` : "";
+    // Session continuity — THE park/wake contract: a woken agent must keep its context.
+    //   known sessionId          -> --resume <id>   (exact session, survives runner restarts)
+    //   /new armed (freshNext)   -> fresh session
+    //   no id but folder has sessions -> --continue (newest session in this cwd)
+    const resume = agent.sessionId ? ` --resume ${agent.sessionId}`
+      : (agent.freshNext ? "" : (listSessions(project).length ? " --continue" : ""));
     const flags = `${chan} --dangerously-skip-permissions --append-system-prompt-file .fleet/rule.txt`;
     const model = agent.model ? ` --model ${agent.model}` : "";
     env = process.env;

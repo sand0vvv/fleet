@@ -269,7 +269,18 @@ export async function startRunner(config) {
       log,
       onExit: (n, e) => onAgentExit(n, e),
     });
-    openAttachWindow(name); // default: pop a terminal window the owner can watch/work in
+    if (a.freshNext) registry.updateAgent(name, { freshNext: false }); // /new consumed by this spawn
+    // Capture the ACTIVE session id (newest .jsonl in the project) once claude has booted, so the
+    // next wake is an exact --resume (and the id gets pinned in the topic via onSession). Without
+    // this the registry never learns the session and park/wake would rely on --continue alone.
+    setTimeout(() => {
+      try {
+        if (!agents.isAlive(name)) return;
+        const cur = registry.getAgent(name);
+        const sid = agents.listSessions(cur?.projectPath || a.projectPath)[0]?.id;
+        if (sid && cur && sid !== cur.sessionId) onSession(name, sid).catch(() => {});
+      } catch {}
+    }, 15000);
     return pid;
   }
   function killCodex(name) { const h = codexHandles.get(name); if (h) { try { h.kill(); } catch {} codexHandles.delete(name); } }
