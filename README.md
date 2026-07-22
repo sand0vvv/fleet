@@ -1,78 +1,115 @@
-# fleet
+# fleet — legacy (cloud architecture)
 
-Управление локальными Claude Code'ами из Telegram: чат (текст/голос/файлы), спавн, управление флотом.
-Отдельный проект (не AEON). Принцип — максимально просто.
+> ⚠️ **This is the LEGACY branch.** The current, recommended version of fleet is on the
+> [`standalone`](https://github.com/sand0vvv/fleet/tree/standalone) branch — fully local,
+> no backend to host, installable with `npm i -g @sand0vvv/fleet`.
+> This branch is kept for reference: it's the original client-server architecture.
 
-## Архитектура
+Drive local Claude Code agents from Telegram: chat (text / voice / files), spawn, manage a whole
+fleet. Each agent lives in its own topic of one Telegram supergroup.
+
+## Architecture
 
 ```
-Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Railway)
-                                                  │  Postgres (Supabase, схема fleet)
-                                                  │  Whisper (faster-whisper) для голоса
+Telegram ──webhook──► receiver (any PaaS) ──► fleet-backend (any PaaS)
+                                                  │  Postgres (schema `fleet`)
+                                                  │  Whisper (faster-whisper) for voice
                                    WS (push)  ◄───┤
-   локально:  runner ◄────────────────────────────┘
-     ├─ headless-агенты: claude --resume -p  (запуск на сообщение)
-     └─ cli-агенты:      claude в отдельном окне + channel-inject
-            └─ fleet-mcp (server: fleet) — send_message/send_file + приём канала
+   local machine:  runner ◄───────────────────────┘
+     ├─ headless agents: claude --resume -p   (spawned per message)
+     └─ cli agents:      claude in its own window + live channel-inject
+            └─ fleet-mcp (server name `fleet`) — send_message/send_file + incoming inject
 ```
 
-- **receiver** — тонкий вебхук Telegram, форвардит в backend.
-- **fleet-backend** — мозг: реестр агентов/машин, роутинг, debounce, Whisper, отправка в TG, WS-сервер для runner'ов и cli-стримов.
-- **runner** — локально на машине: WS к backend, спавн/контроль агентов, логирование (`.fleet/logs/`).
-- **fleet-mcp** — MCP-сервер (имя `fleet`) внутри каждого агента: тулзы `send_message`/`send_file`; в cli ещё и инжект входящих в живую сессию через `notifications/claude/channel`.
+- **receiver** — thin Telegram webhook, forwards updates to the backend.
+- **fleet-backend** — the brain: agent/machine registry, routing, debounce, Whisper, sending to
+  Telegram, WS server for runners and cli streams.
+- **runner** — on the local machine: WS to the backend, spawns/controls agents, logs (`.fleet/logs/`).
+- **fleet-mcp** — MCP server (name `fleet`) inside every agent: `send_message` / `send_file` tools;
+  in cli mode it also injects incoming messages into the live session via
+  `notifications/claude/channel`.
 
-## Два режима агента
-- **headless** — claude запускается на каждое сообщение (`--resume -p`), ответ = вывод. Дёшев в простое.
-- **cli** — claude живёт в отдельном окне; сообщения инжектятся в живую сессию (channel), ответ **строго через `send_message`** (жёстко: system-prompt-правило при спавне + напоминание в каждом инжекте — иначе текст в консоли владелец не видит). Тёплый контекст.
+## Two agent modes
 
-Режим в команде `/spawn` или `/mode`. cli требует `--dangerously-load-development-channels` (промпт авто-подтверждается runner'ом через SendKeys).
+- **headless** — claude runs per message (`--resume -p`), the reply is the output. Cheap at idle.
+- **cli** — claude lives in its own window; messages are injected into the live session (channel),
+  replies go **strictly through `send_message`** (enforced by a system-prompt rule at spawn + a
+  reminder in every inject — console text is invisible to the owner). Warm context.
 
-## Файлы
-- **Тебе → агенту:** кидаешь файл в топик → скачивается в `<project>/.inbox/` → агент читает нативно (`Read`). Работает и в headless, и в cli.
-- **Агент → тебе:** `send_file(path)` → приходит в топик с оригинальным именем.
+Pick the mode in `/spawn` or `/mode`. cli requires `--dangerously-load-development-channels`
+(the prompt is auto-confirmed by the runner).
 
-## Сообщения и тэги
-Каждое сообщение привязано к Telegram `message_id` (вход и выход) в `fleet.messages`.
-Если ответить (reply) на конкретное сообщение в Telegram — агент получит тэг
-`[↩ ответ на #<id>: "<цитата>"]` и поймёт, на что именно ты отвечаешь. `reply_to`
-хранится в БД (тред-линковка).
+## Files
 
-## Голос
-Голосовое → backend → Whisper (faster-whisper, либо Groq если задан `GROQ_API_KEY`) → текст → агенту.
+- **You → agent:** drop a file into the topic → it's downloaded into `<project>/.inbox/` → the
+  agent reads it natively. Works in both modes.
+- **Agent → you:** `send_file(path)` → arrives in the topic with its original name.
 
-## Команды (Telegram)
-- `/spawn <machine> <path> [headless|cli] [model]` — поднять агента (создаётся топик)
-- `/list` · `/machines` · `/status <a>` · `/kill <a>` (полный снос: процесс+топик+БД)
+## Messages & threading
+
+Every message maps to a Telegram `message_id` (in and out) in `fleet.messages`. Replying to a
+specific Telegram message tags the agent with `[↩ reply to #<id>: "<quote>"]` so it knows what
+you're answering. `reply_to` is stored in the DB (thread linkage).
+
+## Voice
+
+Voice note → backend → Whisper (faster-whisper, or Groq if `GROQ_API_KEY` is set) → text → agent.
+
+## Telegram commands
+
+- `/spawn <machine> <path> [headless|cli] [model]` — start an agent (its topic is created)
+- `/list` · `/machines` · `/status <a>` · `/kill <a>` (full removal: process + topic + DB)
 - `/restart <a>` · `/mode <a> <headless|cli>` · `/model <a> <m>` · `/rename <a> <title>`
-- `/sessions <a>` · `/use <a> <id>` — список (id, время, размер) / выбор сессии папки
-- `/status <a>` — показывает **размер контекста сессии в токенах** (+ подсказку «пора /compact» при >150k), жив ли cli-процесс
-- `/compact <a>` — soft-compact (резюме → свежая сессия). headless: новая сессия. **cli: закрывает окно → резюме → перезапускает окно на сжатой сессии.**
+- `/sessions <a>` · `/use <a> <id>` — list the folder's sessions / pick one
+- `/status <a>` — shows the session's **context size in tokens** (+ a "time to /compact" hint
+  above 150k) and whether the cli process is alive
+- `/compact <a>` — soft-compact (summary → fresh session). headless: new session. **cli: closes
+  the window → summarizes → reopens on the compacted session.**
+- `/new <a>` · `/stop <a>` · `/help`
+- `/usage` (General only) — the real Claude limits panel (5h session / week) via
+  `/api/oauth/usage` (token from `~/.claude/.credentials.json` on the runner machine)
 
-**Сессия в закрепе:** текущий `session_id` агента закреплён (pinned) в его топике и хранится в `fleet.agents` — и ты, и агент знают активную сессию. Обновляется при смене (compact/new). cli-сессия автоопределяется (свежайший `.jsonl`).
-- `/new <a>` · `/stop <a>` · `/compact <a>` · `/help`
-- `/usage` (только в General) — реальная панель лимитов Claude (сессия 5ч / неделя / неделя Sonnet) через `/api/oauth/usage` (токен из `~/.claude/.credentials.json` на runner-машине)
+**Pinned session:** the agent's current `session_id` is pinned in its topic and stored in
+`fleet.agents` — both you and the agent know the active session. Updated on compact/new.
 
-**Координатор:** в General можно писать **свободным текстом** (без `/`) — координатор (claude haiku на runner'е) переведёт запрос в команду и выполнит её. Слэш-команды работают всегда.
+**Coordinator:** in General you can type **free text** (no `/`) — a coordinator (claude haiku on
+the runner) turns the request into a command and runs it. Slash commands always work.
 
-## Структура репо
+## Repo layout
+
 `receiver/` · `fleet-backend/` · `runner/` · `fleet-mcp/` · `migrations/`
 
-## Локальная установка (на машину с агентами)
-1. `claude` установлен и залогинен, Node, Python.
-2. `cd fleet-mcp && npm install`
-3. `runner/.env`: `FLEET_BACKEND_HTTP`, `FLEET_BACKEND_WS`, `MACHINE_NAME`, `RUNNER_TOKEN`
-4. `python runner/runner.py` — старт (баннер + логи в консоль/`.fleet/logs/`).
-   - `python runner/runner.py doctor` — самопроверка (env, backend /health, claude)
-   - `python runner/runner.py status` — живое состояние (`.fleet/status.json`: connected, cli-агенты, PID)
+## Deploying (self-hosted)
 
-Runner — это CLI-приложение: автoreconnect WS, watchdog (ловит упавшие cli-окна → пишет в топик `/restart`), ротация логов, чистка cli-окон при Ctrl+C.
+1. **Postgres** — any instance; run the SQL in `migrations/` (schema `fleet`).
+2. **fleet-backend** — deploy anywhere that runs Python (one replica ONLY — the WS manager keeps
+   connections in memory). Env: `DATABASE_URL`, `TG_BOT_TOKEN`, `OWNER_TG_ID`, `RUNNER_SECRET`,
+   optional `GROQ_API_KEY`.
+3. **receiver** — thin webhook service; point Telegram's webhook at it (`FLEET_TOKEN` shared with
+   the backend). Or point the webhook straight at the backend's `/tg/update`.
+4. **runner** (local machine with the agents): `claude` installed and logged in, Node, Python.
+   - `cd fleet-mcp && npm install`
+   - `runner/.env`: `FLEET_BACKEND_HTTP`, `FLEET_BACKEND_WS`, `MACHINE_NAME`, `RUNNER_TOKEN`
+   - `python runner/runner.py` — start (banner + logs to console and `.fleet/logs/`)
+   - `python runner/runner.py doctor` — self-check (env, backend /health, claude)
+   - `python runner/runner.py status` — live state (`.fleet/status.json`)
 
-## Безопасность
-- TG: бот реагирует только на `OWNER_TG_ID`.
-- **Shared-secret auth** (включается когда задан): один и тот же секрет в трёх местах —
-  `RUNNER_SECRET` (fleet-backend) = `FLEET_TOKEN` (receiver) = `RUNNER_TOKEN` (runner).
-  Проверяется на WS (runner + cli-стрим) и на всех POST (`X-Fleet-Token`). Пустой везде = auth выключен (dev).
-- Спавн агентов = RCE-поверхность → только owner, машины по секрету.
+The runner is a CLI app: WS auto-reconnect, watchdog (catches dead cli windows → posts `/restart`
+to the topic), log rotation, cli-window cleanup on Ctrl+C. See `DEPLOY.md` for the step-by-step.
 
-## CI / релизы
-GitHub Actions (ruff + pytest + py_compile + node --check) на каждый push. Релизы — по фичам (`v0.x.0`).
+## Security
+
+- Telegram: the bot only obeys `OWNER_TG_ID`.
+- **Shared-secret auth** (active once set): the same secret in three places —
+  `RUNNER_SECRET` (backend) = `FLEET_TOKEN` (receiver) = `RUNNER_TOKEN` (runner). Checked on WS
+  (runner + cli streams) and on every POST (`X-Fleet-Token`). Empty everywhere = auth off (dev).
+- Spawning agents is an RCE surface → owner only, machines by secret.
+
+## CI / releases
+
+GitHub Actions (ruff + pytest + py_compile + node --check) on every push. Releases per feature
+(`v0.x.0`).
+
+## License
+
+MIT
