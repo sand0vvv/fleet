@@ -17,6 +17,7 @@ import * as registry from "./registry.js";
 import * as agents from "./agents.js";
 import { createDelivery } from "./delivery.js";
 import { createCommands, commandOf } from "./commands.js";
+import { spawnCodexAgent } from "./engine-codex.js";
 import { transcribeUrl } from "./transcribe.js";
 import { linkOwner, isLinked, loadConfig } from "./config.js";
 import { randomBytes } from "node:crypto";
@@ -85,13 +86,18 @@ export async function startRunner(config) {
   // ── agent window/lifecycle state (park on window-close; /hide keeps it running) ──
   const attachWs = new Map();     // name -> current attach-window ws
   const hideKeep = new Set();     // names whose window is being closed by /hide (don't park)
+  const codexHandles = new Map(); // name -> codex handle (codex runs in its OWN console window, not a pty)
+
+  // "alive" = a Claude pty in agents, OR a running codex window.
+  const isAgentAlive = (name) => agents.isAlive(name) || codexHandles.has(name);
 
   // window closed by the owner -> PARK: kill the pty to free resources; registry + sessionId kept so
   // the next message (or /show) wakes it with --continue. Set status BEFORE kill so the watchdog skips it.
   function parkAgent(name) {
     registry.updateAgent(name, { status: "parked" });
     agents.killAgent(name);
-    log(`parked ${name} — pty freed; wakes on next message or /show`);
+    const h = codexHandles.get(name); if (h) { try { h.kill(); } catch {} codexHandles.delete(name); }
+    log(`parked ${name} — freed; wakes on next message or /show`);
   }
   function hide(name) { // /hide: close the window but keep the agent running headless
     hideKeep.add(name);
@@ -100,7 +106,7 @@ export async function startRunner(config) {
     try { ws?.send("\r\n\x1b[33m[fleet] hidden — agent keeps running. /show to reopen.\x1b[0m\r\n"); ws?.close(); } catch {}
   }
   function wakeAgent(name) { // spawn a parked agent (--continue via saved sessionId)
-    if (agents.isAlive(name)) return false;
+    if (isAgentAlive(name)) return false;
     spawnBound(name);
     registry.updateAgent(name, { status: "running" });
     log(`woke ${name}`);
@@ -172,8 +178,12 @@ export async function startRunner(config) {
       onAck,
       onSession,
       onNotify,
-      onStreamConnect: (name) => { registry.updateAgent(name, { status: "running" }); delivery.replay(name).catch(() => {}); },
-      onStreamDisconnect: (name) => { log(`stream disconnect ${name}`); },
+      onStreamConnect: (name) => {
+        registry.updateAgent(name, { status: "running" });
+        delivery.markReady(name, 5000);                    // give a fresh agent time before injecting
+        setTimeout(() => delivery.replay(name).catch(() => {}), 5200);
+      },
+      onStreamDisconnect: (name) => { log(`stream disconnect ${name}`); codexHandles.delete(name); }, // codex window closed -> allow re-spawn
       onRoomSay: () => {}, // rooms are a cloud-only feature; local single-owner build has none
       rooms: () => [],
       // `fleet claude` / `fleet codex` from a terminal: the CLI POSTs here to spawn an agent for a folder.
@@ -242,7 +252,12 @@ export async function startRunner(config) {
   function spawnBound(name) {
     const a = registry.getAgent(name);
     if (!a) throw new Error(`no agent ${name}`);
-    // both engines run through node-pty (agents.spawnAgent dispatches claude vs codex)
+    if ((a.engine || "claude") === "codex") {
+      // codex needs a real console TTY -> its own window (no node-pty / no attach model)
+      const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name), token, log });
+      codexHandles.set(name, h);
+      return h.pid;
+    }
     const pid = agents.spawnAgent(a, {
       backendHttp,
       streamWs: streamWsFor(name),
@@ -254,7 +269,9 @@ export async function startRunner(config) {
     openAttachWindow(name); // default: pop a terminal window the owner can watch/work in
     return pid;
   }
+  function killCodex(name) { const h = codexHandles.get(name); if (h) { try { h.kill(); } catch {} codexHandles.delete(name); } }
   function restartBound(name) {
+    killCodex(name);
     agents.killAgent(name);
     return spawnBound(name);
   }
@@ -285,6 +302,7 @@ export async function startRunner(config) {
     agents,
     spawn: spawnBound,
     restart: restartBound,
+    stopAgent: (n) => { killCodex(n); agents.killAgent(n); }, // engine-agnostic stop for /kill /stop
     hide,
     show,
     config: () => cfg,
@@ -392,14 +410,14 @@ export async function startRunner(config) {
       // fleet commands are handled by the runner; ANY other slash-command is a native Claude/Codex
       // command -> forward it straight into the agent's terminal (wake it first if parked).
       if (FLEET_TOPIC_CMDS.has(c)) { log(`command(topic ${agent.name}): ${text}`); await commands.handle(text, agent); return; }
-      if (!agents.isAlive(agent.name)) wakeAgent(agent.name);
+      if (!isAgentAlive(agent.name)) wakeAgent(agent.name);
       log(`native -> pty ${agent.name}: ${text}`);
       agents.writeInput(agent.name, text);
       return;
     }
 
     // plain message: wake a parked agent (--continue), then deliver.
-    if (!agents.isAlive(agent.name)) wakeAgent(agent.name);
+    if (!isAgentAlive(agent.name)) wakeAgent(agent.name);
     registry.setReplyTarget(agent.name, agent.topicId, null);
     log(`enqueue -> agent=${agent.name} mid=${mid} (debounce ${cfg.debounceSeconds ?? 15}s)`);
     delivery.enqueue(agent.name, text, files, mid);

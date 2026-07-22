@@ -41,6 +41,9 @@ export function commandOf(text) {
 //   deps.log
 export function createCommands(deps) {
   const { telegram, registry, agents, spawn, restart, hide = () => {}, show = () => {}, config, onLinked = () => {}, log = () => {} } = deps;
+  // stopAgent = fully stop a process, engine-agnostic (kills the pty AND a codex console window).
+  // Runner passes one that also clears codexHandles; fallback is the plain claude pty kill.
+  const stopAgent = deps.stopAgent || ((n) => agents.killAgent(n));
 
   const sg = () => config().supergroupId;
 
@@ -223,7 +226,7 @@ export function createCommands(deps) {
     const a = agent || (args.length ? registry.getAgent(args[0]) : null);
     if (!a) return reply(null, `usage: /${op} <agent>`);
     if (op === "kill") {
-      agents.killAgent(a.name);
+      stopAgent(a.name);
       try { await telegram.deleteForumTopic(sg(), a.topicId); } catch {}
       registry.deleteAgent(a.name);
       return reply(null, `${a.name} removed: process stopped, topic and record deleted`);
@@ -242,7 +245,7 @@ export function createCommands(deps) {
       return reply(a.topicId, "new session armed (resume cleared) — /restart to apply");
     }
     // stop
-    agents.killAgent(a.name);
+    stopAgent(a.name);
     registry.updateAgent(a.name, { status: "stopped" });
     return reply(a.topicId, `${a.name} stopped`);
   }

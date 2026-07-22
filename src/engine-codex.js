@@ -127,25 +127,37 @@ export function spawnCodexAgent(agent, env = {}) {
   };
   if (agent.model) childEnv.CODEX_MODEL = agent.model; // informational; TUI model set via config/-m if needed
 
-  log(`spawn codex ${name}: node ${CODEX_SHELL} (CODEX_HOME=${childEnv.CODEX_HOME})`);
+  log(`spawn codex ${name}: new console -> node ${CODEX_SHELL} (CODEX_HOME=${childEnv.CODEX_HOME})`);
 
-  // stdio 'inherit': codex-shell prints a banner to stderr, then the codex TUI takes over this terminal
-  // (a fresh console window when the runner launches it detached). Same visible-window model as claudex.
-  const child = spawn(process.execPath, [CODEX_SHELL], {
-    cwd: project,
-    env: childEnv,
-    stdio: "inherit",
-  });
+  // codex's TUI (`codex --remote`) needs a REAL console TTY (AttachConsole) — node-pty's pty isn't
+  // enough on Windows. So we open codex in its OWN new console window; the owner sees + works in it.
+  let child;
+  if (process.platform === "win32") {
+    child = spawn("cmd.exe", ["/c", "start", `fleet: ${name} (codex)`, "cmd", "/c", "node", CODEX_SHELL],
+      { cwd: project, env: childEnv, detached: true, stdio: "ignore" });
+  } else if (process.platform === "darwin") {
+    child = spawn("osascript", ["-e",
+      `tell app "Terminal" to do script "cd '${project}' && CODEX_HOME='${childEnv.CODEX_HOME}' node '${CODEX_SHELL}'"`],
+      { env: childEnv, detached: true, stdio: "ignore" });
+  } else {
+    child = spawn("x-terminal-emulator", ["-e", `node ${CODEX_SHELL}`], { cwd: project, env: childEnv, detached: true, stdio: "ignore" });
+  }
 
   child.on("error", (e) => log(`codex ${name}: spawn error ${e.message}`));
-  child.on("exit", (code, signal) => {
-    log(`codex ${name}: exit code=${code} signal=${signal || "-"}`);
-    try { onExit?.(name, { exitCode: code, signal }); } catch {}
-  });
 
   return {
     pid: child.pid,
     child,
-    kill: () => { try { child.kill(); return true; } catch { return false; } },
+    // best-effort: kill the codex process tree by its per-agent CODEX_HOME (the launcher already exited).
+    kill: () => {
+      try {
+        if (process.platform === "win32") {
+          spawn("powershell", ["-NoProfile", "-Command",
+            `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${codexHome(project).replace(/\\/g, "/")}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`],
+            { stdio: "ignore" });
+        } else { child.kill(); }
+        return true;
+      } catch { return false; }
+    },
   };
 }

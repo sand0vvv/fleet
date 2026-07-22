@@ -26,7 +26,13 @@ export function createDelivery(deps) {
 
   const pending = new Map(Object.entries(loadJson(pendingPath()))); // name -> { texts, files, mid }
   const timers = new Map();
+  const readyGate = new Map(); // name -> earliest ms we may inject (a freshly-spawned agent needs a
+  //   few seconds after its stream connects before it can process a channel notification; injecting
+  //   too early silently drops the message). Set by markReady() on stream connect.
   let cursors = loadJson(cursorsPath());
+
+  // A freshly (re)connected agent isn't ready to receive an injection for ~a few seconds.
+  function markReady(name, delayMs = 5000) { readyGate.set(name, Date.now() + delayMs); }
 
   const persist = () => saveJson(pendingPath(), Object.fromEntries(pending));
   const hw = (name) => Number(cursors[name] || 0);
@@ -61,11 +67,14 @@ export function createDelivery(deps) {
     if (!a || !buf) return true;
     const mid = buf.mid;
     if (mid && mid <= hw(name)) { pending.delete(name); persist(); log(`deliver ${name}: mid=${mid} <= hw -> skip`); return true; }
+    // not ready yet (just connected) -> keep queued; the sweep retries once the gate passes.
+    const gate = readyGate.get(name) || 0;
+    if (Date.now() < gate) { log(`deliver ${name}: warming up (${Math.ceil((gate - Date.now()) / 1000)}s)`); return false; }
     const text = buf.texts.filter(Boolean).join("\n").trim();
     const ok = server.pushToAgent(name, { mid, text: text || "(attachment)", files: buf.files || [] });
     log(`deliver(cli) ${name} mid=${mid} ok=${ok}`);
     if (ok) {
-      pending.delete(name); persist();
+      pending.delete(name); persist(); readyGate.delete(name); // proven ready
       if (mid) { setHw(name, mid); registry.ackDelivered?.(name, mid); }
       return true;
     }
@@ -87,5 +96,5 @@ export function createDelivery(deps) {
   }, 3000);
   if (sweep.unref) sweep.unref();
 
-  return { enqueue, flush, deliver, replay, hw, setHw, stop: () => clearInterval(sweep) };
+  return { enqueue, flush, deliver, replay, markReady, hw, setHw, stop: () => clearInterval(sweep) };
 }
