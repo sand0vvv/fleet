@@ -1,78 +1,47 @@
-# fleet
+# fleet — legacy-docker (cloud architecture + Docker jail)
 
-Управление локальными Claude Code'ами из Telegram: чат (текст/голос/файлы), спавн, управление флотом.
-Отдельный проект (не AEON). Принцип — максимально просто.
+> ⚠️ **This is a LEGACY branch.** The current, recommended version of fleet is on the
+> [`standalone`](https://github.com/sand0vvv/fleet/tree/standalone) branch — fully local,
+> no backend to host, installable with `npm i -g @sand0vvv/fleet`.
+> This branch = the legacy cloud architecture (see the [`legacy`](https://github.com/sand0vvv/fleet/tree/legacy)
+> branch) **plus a Docker sandbox** that jails the runner and its agents in a container.
 
-## Архитектура
+## What the Docker jail adds
+
+The whole point of this branch: give a **second operator** their own isolated fleet on your
+machine without exposing your files. The runner (and every agent it spawns) lives inside a
+container that can only see ONE host folder:
 
 ```
-Telegram ──webhook──► receiver (Railway) ──► fleet-backend (Railway)
-                                                  │  Postgres (Supabase, схема fleet)
-                                                  │  Whisper (faster-whisper) для голоса
-                                   WS (push)  ◄───┤
-   локально:  runner ◄────────────────────────────┘
-     ├─ headless-агенты: claude --resume -p  (запуск на сообщение)
-     └─ cli-агенты:      claude в отдельном окне + channel-inject
-            └─ fleet-mcp (server: fleet) — send_message/send_file + приём канала
+host:  C:\operator            ←→   container: /workspace
 ```
 
-- **receiver** — тонкий вебхук Telegram, форвардит в backend.
-- **fleet-backend** — мозг: реестр агентов/машин, роутинг, debounce, Whisper, отправка в TG, WS-сервер для runner'ов и cli-стримов.
-- **runner** — локально на машине: WS к backend, спавн/контроль агентов, логирование (`.fleet/logs/`).
-- **fleet-mcp** — MCP-сервер (имя `fleet`) внутри каждого агента: тулзы `send_message`/`send_file`; в cli ещё и инжект входящих в живую сессию через `notifications/claude/channel`.
+Everything else on the host is invisible to the jailed agents. The operator gets their own bot,
+their own supergroup, their own Postgres — a parallel stack that doesn't touch yours.
 
-## Два режима агента
-- **headless** — claude запускается на каждое сообщение (`--resume -p`), ответ = вывод. Дёшев в простое.
-- **cli** — claude живёт в отдельном окне; сообщения инжектятся в живую сессию (channel), ответ **строго через `send_message`** (жёстко: system-prompt-правило при спавне + напоминание в каждом инжекте — иначе текст в консоли владелец не видит). Тёплый контекст.
+- `docker-compose.yml` / `docker-compose.wsl.yml` — the runner container (plain Docker Desktop or
+  WSL2 variants).
+- `docker-start.bat` / `docker-stop.bat` / `docker-*-wsl.bat` — start/stop helpers.
+- `docker-autostart.ps1` — keep the container alive across reboots (registered at logon).
+- `DOCKER_SETUP.md` — the full step-by-step (bot, group, DB migrations, backend env, container).
 
-Режим в команде `/spawn` или `/mode`. cli требует `--dangerously-load-development-channels` (промпт авто-подтверждается runner'ом через SendKeys).
+Setup summary (details in `DOCKER_SETUP.md`):
 
-## Файлы
-- **Тебе → агенту:** кидаешь файл в топик → скачивается в `<project>/.inbox/` → агент читает нативно (`Read`). Работает и в headless, и в cli.
-- **Агент → тебе:** `send_file(path)` → приходит в топик с оригинальным именем.
+1. Create a separate bot + supergroup (Topics on, bot is admin) for the operator.
+2. Fresh Postgres → run `migrations/` (schema `fleet`).
+3. Deploy `fleet-backend/` + `receiver/` for this stack (own env: bot token, owner ids, shared
+   `RUNNER_SECRET`, DB URL). One backend replica only.
+4. `docker compose up -d` on the host — the jailed runner connects out to the backend via WS.
+   No inbound ports on the host.
 
-## Сообщения и тэги
-Каждое сообщение привязано к Telegram `message_id` (вход и выход) в `fleet.messages`.
-Если ответить (reply) на конкретное сообщение в Telegram — агент получит тэг
-`[↩ ответ на #<id>: "<цитата>"]` и поймёт, на что именно ты отвечаешь. `reply_to`
-хранится в БД (тред-линковка).
+## The rest = legacy fleet
 
-## Голос
-Голосовое → backend → Whisper (faster-whisper, либо Groq если задан `GROQ_API_KEY`) → текст → агенту.
+Everything else works exactly like the `legacy` branch: Telegram webhook → receiver → backend
+(Postgres, Whisper, routing, debounce) → WS push down to the runner → agents (headless or cli)
+with the `fleet` MCP for `send_message` / `send_file` and live channel-inject. See the
+[`legacy` README](https://github.com/sand0vvv/fleet/blob/legacy/README.md) for the full
+architecture, commands, modes, and deploy guide.
 
-## Команды (Telegram)
-- `/spawn <machine> <path> [headless|cli] [model]` — поднять агента (создаётся топик)
-- `/list` · `/machines` · `/status <a>` · `/kill <a>` (полный снос: процесс+топик+БД)
-- `/restart <a>` · `/mode <a> <headless|cli>` · `/model <a> <m>` · `/rename <a> <title>`
-- `/sessions <a>` · `/use <a> <id>` — список (id, время, размер) / выбор сессии папки
-- `/status <a>` — показывает **размер контекста сессии в токенах** (+ подсказку «пора /compact» при >150k), жив ли cli-процесс
-- `/compact <a>` — soft-compact (резюме → свежая сессия). headless: новая сессия. **cli: закрывает окно → резюме → перезапускает окно на сжатой сессии.**
+## License
 
-**Сессия в закрепе:** текущий `session_id` агента закреплён (pinned) в его топике и хранится в `fleet.agents` — и ты, и агент знают активную сессию. Обновляется при смене (compact/new). cli-сессия автоопределяется (свежайший `.jsonl`).
-- `/new <a>` · `/stop <a>` · `/compact <a>` · `/help`
-- `/usage` (только в General) — реальная панель лимитов Claude (сессия 5ч / неделя / неделя Sonnet) через `/api/oauth/usage` (токен из `~/.claude/.credentials.json` на runner-машине)
-
-**Координатор:** в General можно писать **свободным текстом** (без `/`) — координатор (claude haiku на runner'е) переведёт запрос в команду и выполнит её. Слэш-команды работают всегда.
-
-## Структура репо
-`receiver/` · `fleet-backend/` · `runner/` · `fleet-mcp/` · `migrations/`
-
-## Локальная установка (на машину с агентами)
-1. `claude` установлен и залогинен, Node, Python.
-2. `cd fleet-mcp && npm install`
-3. `runner/.env`: `FLEET_BACKEND_HTTP`, `FLEET_BACKEND_WS`, `MACHINE_NAME`, `RUNNER_TOKEN`
-4. `python runner/runner.py` — старт (баннер + логи в консоль/`.fleet/logs/`).
-   - `python runner/runner.py doctor` — самопроверка (env, backend /health, claude)
-   - `python runner/runner.py status` — живое состояние (`.fleet/status.json`: connected, cli-агенты, PID)
-
-Runner — это CLI-приложение: автoreconnect WS, watchdog (ловит упавшие cli-окна → пишет в топик `/restart`), ротация логов, чистка cli-окон при Ctrl+C.
-
-## Безопасность
-- TG: бот реагирует только на `OWNER_TG_ID`.
-- **Shared-secret auth** (включается когда задан): один и тот же секрет в трёх местах —
-  `RUNNER_SECRET` (fleet-backend) = `FLEET_TOKEN` (receiver) = `RUNNER_TOKEN` (runner).
-  Проверяется на WS (runner + cli-стрим) и на всех POST (`X-Fleet-Token`). Пустой везде = auth выключен (dev).
-- Спавн агентов = RCE-поверхность → только owner, машины по секрету.
-
-## CI / релизы
-GitHub Actions (ruff + pytest + py_compile + node --check) на каждый push. Релизы — по фичам (`v0.x.0`).
+MIT
