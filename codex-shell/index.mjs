@@ -390,7 +390,12 @@ async function onAppServerReady() {
 // Spawn TUI inline — same terminal, no second window.
 // ---------------------------------------------------------------------------
 function spawnTuiInline(port) {
+  // Session continuity: the runner sets FLEET_CODEX_RESUME=last when this agent's CODEX_HOME
+  // already has recorded sessions (park/wake, /restart) — `codex resume --last` continues the
+  // most recent one. Unset (fresh agent or /new) -> a brand-new session.
+  const resume = process.env.FLEET_CODEX_RESUME === "last" ? ["resume", "--last"] : [];
   const args = [
+    ...resume,
     "--remote",
     `ws://127.0.0.1:${port}`,
     "--dangerously-bypass-approvals-and-sandbox",

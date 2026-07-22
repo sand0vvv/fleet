@@ -259,6 +259,7 @@ export async function startRunner(config) {
       // codex needs a real console TTY -> its own window (no node-pty / no attach model)
       const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name), token, log });
       codexHandles.set(name, h);
+      if (a.freshNext) registry.updateAgent(name, { freshNext: false }); // /new consumed by this spawn
       return h.pid;
     }
     const pid = agents.spawnAgent(a, {

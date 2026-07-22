@@ -17,6 +17,7 @@ import {
   writeFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
   copyFileSync,
   cpSync,
 } from "node:fs";
@@ -37,6 +38,16 @@ function esc(s) {
 // Per-agent CODEX_HOME (where codex reads config.toml + auth). Ports runner.py:_codex_home.
 export function codexHome(project) {
   return join(project, ".codex");
+}
+
+// Any recorded session in this agent's CODEX_HOME? (codex stores rollouts under
+// sessions/YYYY/MM/DD/rollout-*.jsonl). Decides whether a respawn may `codex resume --last`.
+export function hasCodexSessions(project) {
+  try {
+    const d = join(codexHome(project), "sessions");
+    if (!existsSync(d)) return false;
+    return readdirSync(d, { recursive: true }).some((f) => String(f).endsWith(".jsonl"));
+  } catch { return false; }
 }
 
 // Build CODEX_HOME/config.toml for one agent. Ports runner.py:_register_codex_mcp.
@@ -129,6 +140,9 @@ export function spawnCodexAgent(agent, env = {}) {
     FLEET_STREAM_WS: streamWs || "",
   };
   if (agent.model) childEnv.CODEX_MODEL = agent.model; // informational; TUI model set via config/-m if needed
+  // Session continuity (mirrors the claude --resume/--continue contract): this agent's CODEX_HOME
+  // has recorded sessions and /new wasn't armed -> `codex resume --last` in the TUI.
+  if (!agent.freshNext && hasCodexSessions(project)) childEnv.FLEET_CODEX_RESUME = "last";
 
   log(`spawn codex ${name}: new console -> node ${CODEX_SHELL} --agent ${name} (CODEX_HOME=${childEnv.CODEX_HOME})`);
 
