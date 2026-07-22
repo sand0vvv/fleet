@@ -1,0 +1,37 @@
+# ── deps / build ──
+node_modules/
+dist/
+
+# ── secrets / local config (NEVER commit) ──
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+auth.json
+config.json
+.fleet/
+.codex/
+.claude/
+.mcp.json
+
+# ── local runtime state ──
+.inbox/
+.outbox/
+cursor*.json
+state.json
+pending.json
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# ── dev spikes / tests ──
+derisk/
+
+# ── os / editors ──
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

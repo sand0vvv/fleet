@@ -1,0 +1,28 @@
+{
+  "name": "@fleet/runner",
+  "version": "0.1.0",
+  "description": "Run a fleet of AI coding agents (Claude Code / Codex) from your phone, in one Telegram supergroup. Self-hosted, local, no account.",
+  "type": "module",
+  "bin": {
+    "fleet": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "mcp",
+    "codex-shell",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node src/cli.js start"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "node-pty": "^1.1.0",
+    "prompts": "^2.4.2",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
