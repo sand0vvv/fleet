@@ -2,9 +2,13 @@
 // @fleet/runner CLI. Cross-platform (Win/Mac/Linux). Subcommands: init | start | doctor | status.
 import { loadConfig, isLinked, configPath } from "./config.js";
 
+// ASCII of the fleet mark (the site's SVG: a V-formation — lead node + two wings).
 const BANNER = `
-  \x1b[36m🛰  fleet\x1b[0m — a fleet of AI coding agents in your Telegram supergroup
-  \x1b[2mself-hosted · local · no account\x1b[0m
+       \x1b[36m●\x1b[0m
+      \x1b[2m/ \\\x1b[0m        \x1b[36mfleet\x1b[0m — a fleet of AI coding agents in your Telegram supergroup
+     ●   ●      \x1b[2mself-hosted · local · no account\x1b[0m
+    \x1b[2m/     \\\x1b[0m
+   \x1b[2m○       ○\x1b[0m
 `;
 
 const cmd = (process.argv[2] || "").toLowerCase();

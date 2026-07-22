@@ -127,20 +127,22 @@ export function spawnCodexAgent(agent, env = {}) {
   };
   if (agent.model) childEnv.CODEX_MODEL = agent.model; // informational; TUI model set via config/-m if needed
 
-  log(`spawn codex ${name}: new console -> node ${CODEX_SHELL} (CODEX_HOME=${childEnv.CODEX_HOME})`);
+  log(`spawn codex ${name}: new console -> node ${CODEX_SHELL} --agent ${name} (CODEX_HOME=${childEnv.CODEX_HOME})`);
 
   // codex's TUI (`codex --remote`) needs a REAL console TTY (AttachConsole) — node-pty's pty isn't
   // enough on Windows. So we open codex in its OWN new console window; the owner sees + works in it.
+  // `--agent <name>` is a kill-marker only (codex-shell ignores argv): it makes THIS agent's process
+  // tree findable by command line, so kill() can taskkill the exact tree (window included).
   let child;
   if (process.platform === "win32") {
-    child = spawn("cmd.exe", ["/c", "start", `fleet: ${name} (codex)`, "cmd", "/c", "node", CODEX_SHELL],
+    child = spawn("cmd.exe", ["/c", "start", `fleet: ${name} (codex)`, "cmd", "/c", "node", CODEX_SHELL, "--agent", name],
       { cwd: project, env: childEnv, detached: true, stdio: "ignore" });
   } else if (process.platform === "darwin") {
     child = spawn("osascript", ["-e",
-      `tell app "Terminal" to do script "cd '${project}' && CODEX_HOME='${childEnv.CODEX_HOME}' node '${CODEX_SHELL}'"`],
+      `tell app "Terminal" to do script "cd '${project}' && CODEX_HOME='${childEnv.CODEX_HOME}' node '${CODEX_SHELL}' --agent ${name}"`],
       { env: childEnv, detached: true, stdio: "ignore" });
   } else {
-    child = spawn("x-terminal-emulator", ["-e", `node ${CODEX_SHELL}`], { cwd: project, env: childEnv, detached: true, stdio: "ignore" });
+    child = spawn("x-terminal-emulator", ["-e", `node ${CODEX_SHELL} --agent ${name}`], { cwd: project, env: childEnv, detached: true, stdio: "ignore" });
   }
 
   child.on("error", (e) => log(`codex ${name}: spawn error ${e.message}`));
@@ -148,14 +150,28 @@ export function spawnCodexAgent(agent, env = {}) {
   return {
     pid: child.pid,
     child,
-    // best-effort: kill the codex process tree by its per-agent CODEX_HOME (the launcher already exited).
+    // Kill the WHOLE per-agent tree so the console window closes too. Windows: find every process
+    // whose command line ends with our `--agent <name>` marker (the `cmd /c node …` host + node itself)
+    // and taskkill /T /F each — children (codex app-server + codex --remote TUI) die with the tree,
+    // and when node exits the hosting cmd window closes. Fallback sweep: anything still referencing
+    // this agent's CODEX_HOME (belt and braces for detached codex processes).
     kill: () => {
       try {
         if (process.platform === "win32") {
-          spawn("powershell", ["-NoProfile", "-Command",
-            `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${codexHome(project).replace(/\\/g, "/")}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`],
-            { stdio: "ignore" });
-        } else { child.kill(); }
+          const homeFwd = codexHome(project).replace(/\\/g, "/");   // config.toml style
+          const homeBack = codexHome(project).replace(/\//g, "\\"); // native style
+          // NB: exclude $PID — this sweep's own command line contains the marker/path strings.
+          const ps = [
+            `$targets = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*--agent ${name}' };`,
+            `foreach ($p in $targets) { taskkill /PID $p.ProcessId /T /F 2>$null };`,
+            `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*${homeFwd}*' -or $_.CommandLine -like '*${homeBack}*') } | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null }`,
+          ].join(" ");
+          spawn("powershell", ["-NoProfile", "-Command", ps], { stdio: "ignore", detached: true });
+        } else {
+          try { child.kill(); } catch {}
+          // POSIX: kill by the argv marker (the terminal app survives; the codex processes die)
+          spawn("pkill", ["-f", `--agent ${name}$`], { stdio: "ignore" });
+        }
         return true;
       } catch { return false; }
     },

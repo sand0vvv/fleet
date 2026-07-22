@@ -19,9 +19,10 @@ import { createDelivery } from "./delivery.js";
 import { createCommands, commandOf } from "./commands.js";
 import { spawnCodexAgent } from "./engine-codex.js";
 import { transcribeUrl } from "./transcribe.js";
-import { linkOwner, isLinked, loadConfig } from "./config.js";
+import { linkOwner, isLinked, loadConfig, fleetDir } from "./config.js";
 import { randomBytes } from "node:crypto";
-import { spawn as spawnProc } from "node:child_process";
+import { spawn as spawnProc, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -302,7 +303,7 @@ export async function startRunner(config) {
     agents,
     spawn: spawnBound,
     restart: restartBound,
-    stopAgent: (n) => { killCodex(n); agents.killAgent(n); }, // engine-agnostic stop for /kill /stop
+    stopAgent: (n) => { killCodex(n); agents.killAgent(n); delivery.clear(n); }, // engine-agnostic stop for /kill /stop (+ drop queued msgs so nothing resurrects it)
     hide,
     show,
     config: () => cfg,
@@ -424,7 +425,57 @@ export async function startRunner(config) {
   }
 
   // ── start everything ────────────────────────────────────────────────────────
-  await server.listen();
+  // Single instance: exactly ONE runner per machine. A stale/zombie runner (old code, forgotten
+  // window) holds both the port AND the Telegram poll — every symptom looks like "fleet is broken"
+  // while the zombie answers with stale code. So: pid file -> kill the old runner tree -> take over.
+  const pidPath = join(fleetDir(), "runner.pid");
+  function killStaleRunner() {
+    if (!existsSync(pidPath)) return;
+    const oldPid = Number(readFileSync(pidPath, "utf-8").trim());
+    if (!oldPid || oldPid === process.pid) return;
+    try { process.kill(oldPid, 0); } catch { return; } // not running — stale file only
+    console.log(`\x1b[33m→ another fleet runner is running (pid ${oldPid}) — taking over.\x1b[0m`);
+    if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(oldPid), "/T", "/F"], { stdio: "ignore" });
+    else { try { process.kill(oldPid, "SIGTERM"); } catch {} }
+  }
+  // Fallback for pre-pid-file zombies: resolve who LISTENS on our port; if it's a node process
+  // (i.e. an old runner), kill its tree and take the port.
+  function killPortHolder() {
+    try {
+      if (process.platform === "win32") {
+        const r = spawnSync("powershell", ["-NoProfile", "-Command",
+          `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; if ($p -and $p.ProcessName -match 'node') { taskkill /PID $($c.OwningProcess) /T /F | Out-Null; 'killed' } else { \"busy:$($p.ProcessName)\" } }`],
+          { encoding: "utf-8" });
+        return (r.stdout || "").trim();
+      }
+      const r = spawnSync("sh", ["-c", `pid=$(lsof -ti tcp:${port} -s tcp:listen | head -1); if [ -n "$pid" ]; then if ps -p $pid -o comm= | grep -q node; then kill -9 $pid && echo killed; else echo busy:$(ps -p $pid -o comm=); fi; fi`], { encoding: "utf-8" });
+      return (r.stdout || "").trim();
+    } catch { return ""; }
+  }
+  killStaleRunner();
+  try {
+    await server.listen();
+  } catch (e) {
+    if (e?.code === "EADDRINUSE") {
+      const who = killPortHolder();
+      if (who === "killed") console.log(`\x1b[33m→ a stale runner held port ${port} — killed it, taking over.\x1b[0m`);
+      // taskkill releases the port asynchronously — short grace, then one retry; then a clean
+      // one-liner instead of a traceback.
+      await new Promise((r) => setTimeout(r, 1500));
+      try { await server.listen(); } catch (e2) {
+        if (e2?.code === "EADDRINUSE") {
+          console.log(`\x1b[31mfleet: port ${port} is busy${who && who !== "killed" ? ` (${who.replace("busy:", "process: ")})` : ""} and it's not a runner I can replace.\x1b[0m`);
+          console.log(`Stop that process, or set a different "port" in ${join(fleetDir(), "config.json")}.`);
+          process.exit(1);
+        }
+        throw e2;
+      }
+    } else throw e;
+  }
+  writeFileSync(pidPath, String(process.pid));
+  const dropPid = () => { try { if (Number(readFileSync(pidPath, "utf-8").trim()) === process.pid) rmSync(pidPath); } catch {} };
+  process.on("exit", dropPid);
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { dropPid(); process.exit(0); }); // Ctrl+C doesn't fire "exit"
   log(`localhost server on ${backendHttp}`);
 
   // make sure no webhook is set (long-poll won't receive updates while a webhook is active) + register menu

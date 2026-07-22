@@ -1,20 +1,52 @@
 // `fleet init` — interactive setup wizard. Writes ~/.fleet/config.json. Secrets never leave home.
+// Existing secrets are shown MASKED (8853…HTI) with keep/change/show — re-running init never
+// forces you to retype (or even see) a token.
 import prompts from "prompts";
 import { randomBytes } from "node:crypto";
 import { loadConfig, saveConfig, configPath } from "./config.js";
+
+const onCancel = () => { console.log("\n  cancelled."); process.exit(1); };
+
+const mask = (s) => { s = String(s || ""); return s.length <= 8 ? "•••" : s.slice(0, 4) + "…" + s.slice(-3); };
+
+// Ask for a secret. No current value -> plain text prompt. Has one -> masked keep/change/show menu.
+async function secretPrompt(label, current, validate) {
+  if (!current) {
+    const a = await prompts({ type: "text", name: "v", message: label, validate }, { onCancel });
+    return String(a.v || "").trim();
+  }
+  for (;;) {
+    const a = await prompts({
+      type: "select", name: "act",
+      message: `${label}  \x1b[2m${mask(current)}\x1b[0m`,
+      choices: [
+        { title: "keep", value: "keep" },
+        { title: "change", value: "change" },
+        { title: "show", value: "show" },
+      ],
+      initial: 0,
+    }, { onCancel });
+    if (a.act === "keep") return current;
+    if (a.act === "change") {
+      const b = await prompts({ type: "text", name: "v", message: `new ${label}`, validate }, { onCancel });
+      const v = String(b.v || "").trim();
+      return v || current; // blank = keep the old one
+    }
+    console.log(`  ${label}: ${current}`); // show, then ask again
+  }
+}
 
 export async function runInit() {
   const cur = loadConfig();
   console.log("\n  \x1b[36m🛰  fleet setup\x1b[0m — stored locally at " + configPath() + "\n");
 
+  const botToken = await secretPrompt(
+    "Telegram bot token (from @BotFather)",
+    cur.botToken || "",
+    (v) => (/^\d+:[\w-]{30,}$/.test(String(v).trim()) ? true : "Looks like that's not a bot token"),
+  );
+
   const a = await prompts([
-    {
-      type: "text",
-      name: "botToken",
-      message: "Telegram bot token (from @BotFather)",
-      initial: cur.botToken || "",
-      validate: (v) => (/^\d+:[\w-]{30,}$/.test(String(v).trim()) ? true : "Looks like that's not a bot token"),
-    },
     {
       type: "select",
       name: "provider",
@@ -27,12 +59,14 @@ export async function runInit() {
       ],
       initial: 0,
     },
-    {
-      type: (prev) => (prev === "groq" || prev === "openai" ? "text" : null),
-      name: "whisperKey",
-      message: (prev) => `${prev === "groq" ? "Groq" : "OpenAI"} API key`,
-      initial: cur.whisper?.key || "",
-    },
+  ], { onCancel });
+
+  let whisperKey = cur.whisper?.key || "";
+  if (a.provider === "groq" || a.provider === "openai") {
+    whisperKey = await secretPrompt(`${a.provider === "groq" ? "Groq" : "OpenAI"} API key`, whisperKey);
+  }
+
+  const b = await prompts([
     {
       type: "number",
       name: "debounceSeconds",
@@ -52,15 +86,15 @@ export async function runInit() {
       message: "Name for this machine",
       initial: cur.machineName || "home",
     },
-  ], { onCancel: () => { console.log("\n  cancelled."); process.exit(1); } });
+  ], { onCancel });
 
   const cfg = {
     ...cur,
-    botToken: String(a.botToken).trim(),
-    whisper: { provider: a.provider === "none" ? "groq" : a.provider, key: a.whisperKey ? String(a.whisperKey).trim() : (cur.whisper?.key || "") },
-    debounceSeconds: Number.isFinite(Number(a.debounceSeconds)) ? Math.max(0, Number(a.debounceSeconds)) : 15,
-    model: String(a.model || "").trim(),
-    machineName: String(a.machineName || "home").trim(),
+    botToken,
+    whisper: { provider: a.provider === "none" ? "groq" : a.provider, key: whisperKey },
+    debounceSeconds: Number.isFinite(Number(b.debounceSeconds)) ? Math.max(0, Number(b.debounceSeconds)) : 15,
+    model: String(b.model || "").trim(),
+    machineName: String(b.machineName || "home").trim(),
     runnerToken: cur.runnerToken || randomBytes(16).toString("hex"),
   };
   saveConfig(cfg);

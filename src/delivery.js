@@ -86,15 +86,25 @@ export function createDelivery(deps) {
     if (pending.has(name)) { log(`replay ${name}`); await deliver(name); }
   }
 
+  // Drop everything queued for `name` (killed agent — nothing should resurrect it).
+  function clear(name) {
+    const t = timers.get(name);
+    if (t) { clearTimeout(t); timers.delete(name); }
+    pending.delete(name);
+    readyGate.delete(name);
+    persist();
+  }
+
   // Background safety net: retry any queued message whose agent is now online (covers debounce=0
   // races and a woken agent that connected without a fresh onStreamConnect firing).
   const sweep = setInterval(() => {
     for (const name of pending.keys()) {
+      if (!registry.getAgent(name)) { clear(name); continue; } // ghost (agent deleted) — GC, don't resurrect
       if (server.isOnline(name)) deliver(name).catch(() => {});
       else ensureAlive(name);
     }
   }, 3000);
   if (sweep.unref) sweep.unref();
 
-  return { enqueue, flush, deliver, replay, markReady, hw, setHw, stop: () => clearInterval(sweep) };
+  return { enqueue, flush, deliver, replay, markReady, clear, hw, setHw, stop: () => clearInterval(sweep) };
 }

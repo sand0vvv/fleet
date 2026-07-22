@@ -87,7 +87,13 @@ export function startServer({ port, token, handlers = {} }) {
 
   return {
     server,
-    listen: () => new Promise((r) => server.listen(port, () => r(port))),
+    // reject on bind errors (EADDRINUSE etc.) — without the once("error") handler the error is
+    // emitted as an unhandled event and crashes the process before any caller's try/catch sees it.
+    listen: () => new Promise((resolve, reject) => {
+      const onErr = (e) => { server.removeListener("error", onErr); reject(e); };
+      server.once("error", onErr);
+      server.listen(port, () => { server.removeListener("error", onErr); resolve(port); });
+    }),
     close: () => new Promise((r) => server.close(() => r())),
     isOnline: (name) => streams.has(name),
     // push a message down to a live cli agent. Returns false if the agent isn't connected.
