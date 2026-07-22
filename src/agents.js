@@ -87,6 +87,17 @@ function wireProject(project, name, { backendHttp, streamWs, token }) {
   if (!existsSync(cursorPath)) writeFileSync(cursorPath, JSON.stringify({ hw: 0 }));
 }
 
+// Force the project's MCP replay-cursor to the runner's authoritative high-water. A stale/foreign
+// hw in .fleet/cursor.json (e.g. a Date.now() left behind by tests) makes the MCP silently drop
+// every real message — telegram mids are tiny — which reads as "deliver ok=true but nothing ever
+// appears in the session". Call before EVERY spawn; the runner's ~/.fleet/cursors.json is truth.
+export function syncCursor(project, hw) {
+  try {
+    mkdirSync(join(project, ".fleet"), { recursive: true });
+    writeFileSync(join(project, ".fleet", "cursor.json"), JSON.stringify({ hw: Number(hw) || 0 }));
+  } catch {}
+}
+
 // ── spawn (ports derisk.mjs step 3 + runner.py _spawn_cli) ───────────────────
 // agent: the registry record { name, projectPath, model, sessionId, ... }.
 // opts: { backendHttp, streamWs, token, channelMode, onExit(name, exitInfo), log }
@@ -160,6 +171,7 @@ export function spawnAgent(agent, opts = {}) {
   pty.onExit((e) => {
     log(`${name}: pty EXIT ${JSON.stringify(e)}`);
     if (procs.get(name)?.pty === pty) procs.delete(name);
+    if (deliberate.delete(name)) return; // killed on purpose — not a crash, no watchdog
     try { onExit?.(name, e); } catch {}
   });
 
@@ -202,9 +214,15 @@ export function isAlive(name) {
   return procs.has(name);
 }
 
+// Deliberate kills must NOT look like crashes: killAgent marks the name so the async pty-exit
+// event skips the onExit callback. Without this the watchdog races /kill's `await deleteForumTopic`
+// gap, sees a still-registered "running" agent and respawns it — new pty + new window on every kill.
+const deliberate = new Set();
+
 export function killAgent(name) {
   const p = procs.get(name);
   if (!p) return false;
+  deliberate.add(name);
   procs.delete(name);
   try { p.pty.kill(); } catch {}
   return true;

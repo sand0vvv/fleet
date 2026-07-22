@@ -4,6 +4,7 @@
 import prompts from "prompts";
 import { randomBytes } from "node:crypto";
 import { loadConfig, saveConfig, configPath } from "./config.js";
+import { BANNER } from "./banner.js";
 
 const onCancel = () => { console.log("\n  cancelled."); process.exit(1); };
 
@@ -38,7 +39,8 @@ async function secretPrompt(label, current, validate) {
 
 export async function runInit() {
   const cur = loadConfig();
-  console.log("\n  \x1b[36m🛰  fleet setup\x1b[0m — stored locally at " + configPath() + "\n");
+  process.stdout.write(BANNER);
+  console.log("  \x1b[36msetup\x1b[0m — stored locally at " + configPath() + "\n");
 
   const botToken = await secretPrompt(
     "Telegram bot token (from @BotFather)",

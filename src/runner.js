@@ -22,7 +22,7 @@ import { transcribeUrl } from "./transcribe.js";
 import { linkOwner, isLinked, loadConfig, fleetDir } from "./config.js";
 import { randomBytes } from "node:crypto";
 import { spawn as spawnProc, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +253,8 @@ export async function startRunner(config) {
   function spawnBound(name) {
     const a = registry.getAgent(name);
     if (!a) throw new Error(`no agent ${name}`);
+    // Authoritative cursor sync (see agents.syncCursor): a stale hw silently eats every message.
+    agents.syncCursor(a.projectPath, delivery.hw(name));
     if ((a.engine || "claude") === "codex") {
       // codex needs a real console TTY -> its own window (no node-pty / no attach model)
       const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name), token, log });
@@ -282,6 +284,7 @@ export async function startRunner(config) {
     const a = registry.getAgent(name);
     if (!a) return; // killed on purpose (record already deleted)
     if (a.status === "stopped" || a.status === "parked") return; // deliberate stop / window-close park
+    if (isAgentAlive(name)) return; // a newer pty is already running (restart raced the old exit) — don't double-spawn
     const g = agents.shouldRestart(name);
     if (g.loop) {
       onNotify(name, `crash loop (${g.count}x in 5min) — auto-restart stopped. Fix it, then /restart ${name}.`);
@@ -303,7 +306,19 @@ export async function startRunner(config) {
     agents,
     spawn: spawnBound,
     restart: restartBound,
-    stopAgent: (n) => { killCodex(n); agents.killAgent(n); delivery.clear(n); }, // engine-agnostic stop for /kill /stop (+ drop queued msgs so nothing resurrects it)
+    // engine-agnostic full stop for /kill /stop: mark stopped FIRST (watchdog checks status), kill
+    // both engines, drop queued msgs (nothing resurrects it), close the attach window (attach.js
+    // exits on ws close -> its console window closes).
+    stopAgent: (n) => {
+      registry.updateAgent(n, { status: "stopped" });
+      const ws = attachWs.get(n);
+      if (ws) hideKeep.add(n); // this attach-ws close must NOT be treated as a window-close park
+      killCodex(n);
+      agents.killAgent(n);
+      delivery.clear(n);
+      try { ws?.send("\r\n\x1b[31m[fleet] agent killed.\x1b[0m\r\n"); ws?.close(); } catch {}
+      attachWs.delete(n);
+    },
     hide,
     show,
     config: () => cfg,

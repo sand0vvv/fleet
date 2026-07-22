@@ -87,10 +87,11 @@ const C = {
 function printBanner() {
   const lines = [
     "",
-    `  ${C.bold}${C.cyan}╭─────────────────────────────────────────────╮${C.reset}`,
-    `  ${C.bold}${C.cyan}│${C.reset}  ${C.bold}fleet${C.reset} ${C.dim}x${C.reset} ${C.bold}Codex${C.reset}                              ${C.bold}${C.cyan}│${C.reset}`,
-    `  ${C.bold}${C.cyan}│${C.reset}  ${C.dim}native push messaging for AI agents${C.reset}        ${C.bold}${C.cyan}│${C.reset}`,
-    `  ${C.bold}${C.cyan}╰─────────────────────────────────────────────╯${C.reset}`,
+    `       ${C.cyan}●${C.reset}`,
+    `      ${C.dim}/ \\${C.reset}        ${C.cyan}fleet${C.reset} ${C.dim}×${C.reset} ${C.bold}Codex${C.reset}`,
+    `     ●   ●      ${C.dim}self-hosted · local · no account${C.reset}`,
+    `    ${C.dim}/     \\${C.reset}`,
+    `   ${C.dim}○       ○${C.reset}`,
     "",
   ];
   if (AGENT) {

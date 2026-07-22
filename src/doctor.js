@@ -1,6 +1,7 @@
 // `fleet doctor` — environment check. Green = ready, yellow = optional/missing, red = blocking.
 import { spawnSync } from "node:child_process";
 import { loadConfig, isLinked, configPath } from "./config.js";
+import { BANNER } from "./banner.js";
 
 const G = "\x1b[32m●\x1b[0m", Y = "\x1b[33m●\x1b[0m", R = "\x1b[31m●\x1b[0m";
 
@@ -33,7 +34,8 @@ export async function runDoctor() {
 
   rows.push([isLinked(cfg) ? G : Y, "linked", isLinked(cfg) ? `owner ${cfg.ownerId} · group ${cfg.supergroupId}` : "not yet — send /link in your supergroup"]);
 
-  console.log(`\n  \x1b[36m🛰  fleet doctor\x1b[0m   (${configPath()})\n`);
+  process.stdout.write(BANNER);
+  console.log(`  \x1b[36mdoctor\x1b[0m   (${configPath()})\n`);
   for (const [dot, label, val] of rows) console.log(`  ${dot} ${label.padEnd(12)} ${val}`);
   const blocking = rows.some((r) => r[0] === R);
   console.log(blocking ? "\n  \x1b[31mFix the red items before `fleet start`.\x1b[0m\n" : "\n  \x1b[32mReady.\x1b[0m Run: fleet start\n");
