@@ -1,6 +1,6 @@
 {
   "name": "@sand0vvv/fleet",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Run a fleet of AI coding agents (Claude Code / Codex) from your phone, in one Telegram supergroup. Self-hosted, local, no account.",
   "type": "module",
   "bin": {
