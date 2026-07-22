@@ -48,10 +48,11 @@ export function createCommands(deps) {
   const sg = () => config().supergroupId;
 
   // reply into the supergroup: General (thread null) or a specific topic.
+  // Returns the Telegram API result so callers can detect a dead topic (ok:false, thread not found).
   async function reply(threadId, text) {
     const chat = sg();
-    if (!chat) { log("reply skipped — supergroup unknown"); return; }
-    await telegram.sendMessage(chat, text, threadId ?? undefined);
+    if (!chat) { log("reply skipped — supergroup unknown"); return null; }
+    return telegram.sendMessage(chat, text, threadId ?? undefined);
   }
 
   async function handle(text, agent = null) {
@@ -77,7 +78,7 @@ export function createCommands(deps) {
       case "use": return cmdUse(args, agent);
       case "mode": return cmdSet(args, "mode");
       case "model": return cmdModel(args, agent);
-      case "usage": return cmdUsage();
+      case "usage": return cmdUsage(agent);
       case "rename": return cmdRename(args, agent);
       default: return reply(null, `unknown command: /${cmd}`);
     }
@@ -118,7 +119,17 @@ export function createCommands(deps) {
       try {
         const pid = restart(name);
         registry.updateAgent(name, { status: "running" });
-        return reply(existing.topicId, `agent ${name} re-spawned (pid ${pid})`);
+        // The record may point at a DELETED topic (agent was killed / topic removed earlier) —
+        // the announce silently vanishes and it looks like "spawn didn't create a topic".
+        // Detect the failed send and mint a fresh topic for the revived agent.
+        const r = await reply(existing.topicId, `agent ${name} re-spawned (pid ${pid})`);
+        if (r && r.ok === false) {
+          const topicId = await telegram.createForumTopic(sg(), name);
+          if (!topicId) return reply(null, `agent ${name} re-spawned, but its topic is gone and I could not create a new one`);
+          registry.updateAgent(name, { topicId });
+          return reply(topicId, `agent ${name} re-spawned (pid ${pid}) — old topic was gone, made a new one`);
+        }
+        return;
       } catch (e) { return reply(existing.topicId, `re-spawn error: ${String(e?.message || e)}`); }
     }
     const topicId = await telegram.createForumTopic(sg(), name);
@@ -171,7 +182,9 @@ export function createCommands(deps) {
     const a = agent || (args.length ? registry.getAgent(args[0]) : null);
     if (!a) return reply(null, "usage: /context <agent>");
     const tok = agents.sessionTokens(a.projectPath, a.sessionId || null);
-    const size = tok != null ? `~${Math.floor(tok / 1000)}k tokens` : "unknown (spawn/talk first)";
+    const size = tok != null
+      ? `~${Math.floor(tok / 1000)}k tokens (${Math.min(100, Math.round(tok / 2000))}% of 200k)`
+      : "unknown (spawn/talk first)";
     if (agents.isAlive(a.name)) agents.writeInput(a.name, "/context");
     await telegram.sendKeyboard(sg(), `${a.name} — context: ${size}`, a.topicId,
       [[{ text: "Compact now", data: `compact:${a.name}:` }]]);
@@ -181,6 +194,8 @@ export function createCommands(deps) {
   async function cmdNative(op, args, agent) {
     const a = agent || (args.length ? registry.getAgent(args[0]) : null);
     if (!a) return reply(null, `usage: /${op} <agent>`);
+    if ((a.engine || "claude") === "codex")
+      return reply(a.topicId, `codex runs in its own window — type /${op === "clear" ? "new" : op} there`);
     if (!agents.isAlive(a.name)) return reply(a.topicId, "agent process is not running — /restart it first");
     const ok = agents.writeInput(a.name, `/${op}`);
     if (!ok) return reply(a.topicId, `/${op} failed — pty not writable`);
@@ -211,15 +226,20 @@ export function createCommands(deps) {
     return reply(a.topicId, `${a.name}: model → ${args[1]} · /restart to apply`);
   }
 
-  // /usage -> a fleet overview (each agent's status + context size) into General.
-  async function cmdUsage() {
+  // /usage -> in a topic: THAT agent's line into the topic; in General: the whole fleet.
+  function usageLine(r) {
+    const tok = agents.sessionTokens(r.projectPath, r.sessionId || null);
+    const alive = agents.isAlive(r.name);
+    const ctx = tok != null
+      ? `context ~${Math.floor(tok / 1000)}k tokens (${Math.min(100, Math.round(tok / 2000))}% of 200k)${tok > 150000 ? " — consider /compact" : ""}`
+      : "context unknown (talk to it first)";
+    return `${r.name} · ${r.engine || "claude"} · ${r.model || "default model"} · ${alive ? "running" : r.status} · ${ctx}`;
+  }
+  async function cmdUsage(agent) {
+    if (agent) return reply(agent.topicId, usageLine(agent));
     const rows = registry.listAgents();
     if (!rows.length) return reply(null, "no agents");
-    const lines = rows.map((r) => {
-      const tok = agents.sessionTokens(r.projectPath, r.sessionId || null);
-      return `- ${r.name}: ${r.status}${tok != null ? ` · ~${Math.floor(tok / 1000)}k ctx` : ""}`;
-    });
-    await reply(null, "Fleet usage:\n" + lines.join("\n"));
+    await reply(null, "Fleet usage:\n" + rows.map((r) => "- " + usageLine(r)).join("\n"));
   }
 
   async function cmdAgentOp(op, args, agent) {

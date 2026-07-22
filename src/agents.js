@@ -180,10 +180,17 @@ export function spawnAgent(agent, opts = {}) {
 }
 
 // ── native slash commands: write straight into the live pty (/clear, /compact) ──
+// The Enter goes SEPARATELY after a beat: a single "text\r" chunk can be treated as a PASTE by the
+// TUI (the \r becomes a literal newline in the input box and the command never runs). A detached \r
+// after the command has rendered reliably submits it.
 export function writeInput(name, text) {
   const p = procs.get(name);
   if (!p) return false;
-  try { p.pty.write(text + "\r"); return true; } catch { return false; }
+  try {
+    p.pty.write(text);
+    setTimeout(() => { try { p.pty.write("\r"); } catch {} }, 350);
+    return true;
+  } catch { return false; }
 }
 
 // ── attach: forward raw keystrokes from an attached terminal into the live pty ──
