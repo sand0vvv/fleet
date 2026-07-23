@@ -9,9 +9,15 @@
   Self-hosted · local · no account.
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/@sand0vvv/fleet"><img src="https://img.shields.io/npm/v/%40sand0vvv%2Ffleet?label=npm&color=22d3ee" alt="npm"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"></a>
+  <img src="https://img.shields.io/badge/platform-win%20%7C%20mac%20%7C%20linux-8b949e" alt="platforms">
+</p>
+
 ---
 
-Fleet lets you drive a whole team of AI coding agents — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex](https://github.com/openai/codex) — from your phone, in a single Telegram supergroup. Each agent gets its own **topic** in the group. You text (or voice-message) them, they work on your machine and text back: code, files, questions, progress.
+Fleet lets you drive a whole team of AI coding agents — [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex](https://github.com/openai/codex) — from your phone, in a single Telegram supergroup. Each agent gets its own **topic** in the group. You text (or voice-message) them, they work on your machine and text back: code, files, screenshots, questions, progress.
 
 Everything runs **locally**. No cloud service, no sign-up, no dashboard. Your Telegram bot token and API keys stay on your machine in `~/.fleet/config.json`. Telegram is reached via long-polling — no public URL, no webhook, works behind any NAT.
 
@@ -48,13 +54,15 @@ A topic appears named after the folder, a terminal window opens on your machine,
 
 ```
 Telegram supergroup
-├─ General          ← fleet commands: /spawn /list /usage …
-├─ my-webapp        ← Claude Code agent working in ~/code/my-webapp
-├─ my-webapp-codex  ← Codex agent in the same folder
-└─ data-pipeline    ← another Claude agent, another folder
+├─ General             ← fleet commands: /spawn /list /usage …
+├─ 🟢 my-webapp        ← Claude Code agent, running
+├─ 🟢 my-webapp-codex  ← Codex agent in the same folder
+└─ 🟡 data-pipeline    ← parked (wakes on your next message)
 ```
 
-Every agent runs on **your** machine. Claude agents live in a real terminal window you can watch and type into; close the window and the agent parks (frees resources) — it wakes automatically on your next message, with its session continued. Codex agents open their own console window, driven live by the bundled `codex-shell`.
+Topic titles carry live status: 🟢 running · 🟡 parked · 🔴 stopped/crashed. While an agent works on your message, the topic shows *typing…*.
+
+Every agent runs on **your** machine. Claude agents live in a real terminal window you can watch and type into; close the window and the agent parks (frees resources) — it wakes automatically on your next message, **with its session continued** (`--resume`/`--continue`). Codex agents open their own console window and also resume their last session on wake. A fresh session only happens when you ask for one (`/new`).
 
 ## Commands
 
@@ -65,7 +73,7 @@ Send these in Telegram (the bot's `/` menu shows them too):
 | `/link` | anywhere in the group | bind the fleet to you + this supergroup (first run) |
 | `/spawn <path> [codex] [model]` | General | new agent for a folder (its own topic + window) |
 | `/list` | General | all agents and their state |
-| `/usage` | General / topic | fleet overview / this agent's native usage screen |
+| `/usage` | anywhere | real Claude limits panel (5h session / weekly) from your local login |
 | `/status <agent>` | General | one agent's state, session, context size |
 | `/context` | topic | the agent's real `/context` output, relayed to Telegram |
 | `/compact` `/clear` | topic | native Claude commands, typed into the live terminal |
@@ -76,23 +84,30 @@ Send these in Telegram (the bot's `/` menu shows them too):
 | `/sessions` / `/use <id>` | topic | list this folder's sessions / resume a specific one |
 | `/rename <name>` | topic | rename agent + topic |
 | `/kill` | topic | remove the agent: process, topic, record |
+| `/help` | anywhere | contextual: fleet commands in General, agent commands in a topic |
 
 Any **other** slash command you type in an agent's topic (e.g. `/cost`, `/doctor`, `/review`) is forwarded straight into the agent's terminal as a native command.
 
 **Voice**: send a voice message in an agent's topic — it's transcribed (Groq / OpenAI / local Whisper, your choice in `fleet init`) and delivered as text.
 
-**Files**: agents send files and screenshots back into their topic; anything you attach in the topic is handed to the agent.
+**Files**: agents send files and screenshots back into their topic; anything you attach in the topic is downloaded into the agent's `.inbox/` and handed to it.
 
 ## The CLI
 
 ```
-fleet init      set up bot token, whisper, defaults  (safe to re-run; secrets shown masked)
-fleet start     run the fleet (single instance — a stale runner is replaced automatically)
-fleet claude    spawn a Claude agent for the current folder
-fleet codex     spawn a Codex agent for the current folder
-fleet doctor    check node/claude/codex/token/link
-fleet status    show current config
+fleet init          set up bot token, whisper, defaults  (re-run safe; secrets shown masked)
+fleet start         run the fleet (single instance — a stale runner is replaced automatically)
+fleet stop          stop the running fleet
+fleet update        stop → npm i -g latest → restart, in one command
+fleet logs [n]      last n lines of the runner log
+fleet autostart on|off   start the fleet at logon (Windows)
+fleet claude        spawn a Claude agent for the current folder
+fleet codex         spawn a Codex agent for the current folder
+fleet doctor        check node/claude/codex/token/link
+fleet status        show current config + version
 ```
+
+Every command tells you when a newer version is on npm; the runner also drops a one-liner into your group.
 
 ## How it works
 
@@ -110,15 +125,16 @@ Telegram  ⇄ long-poll ⇄  fleet runner (your machine)
 3. Each agent has a small **fleet MCP** that dials the runner back on `localhost` to push replies and files up to Telegram; incoming messages are injected into the live session (Claude: channel notification; Codex: `turn/start` over the app-server protocol).
 4. The runner posts the agent's reply into the right topic.
 
-**Reliability**: messages to a parked/offline agent are queued on disk and delivered when it wakes — nothing is lost if you closed the window. Rapid consecutive messages are debounced into one delivery (configurable, `0` = instant). A crashed agent is auto-restarted (crash-loop guarded).
+**Reliability, both directions.** Messages **to** a parked/offline agent are queued on disk and delivered when it wakes — nothing is lost if you closed the window. Replies and files **from** agents survive network hiccups the same way (on-disk outbox, retried in order). Rapid consecutive messages are debounced into one delivery (configurable, `0` = instant). A crashed agent is auto-restarted (crash-loop guarded), and if the **runner itself** dies it posts a crash report into your group before going down.
 
-**State**: everything lives in `~/.fleet/` — `config.json` (token, owner, group, defaults), `state.json` (agents/topics/sessions), delivery queue + cursors. Secrets never touch a project directory, so they can't be committed by accident. Delete the folder to factory-reset. (Override the config path with the `FLEET_CONFIG` env var.)
+**State**: everything lives in `~/.fleet/` — `config.json` (token, owner, group, defaults), `state.json` (agents/topics/sessions), delivery queues, logs. Secrets never touch a project directory, so they can't be committed by accident. Delete the folder to factory-reset. (Override the config path with the `FLEET_CONFIG` env var.)
 
 ## Troubleshooting
 
-- `fleet doctor` first — it checks everything.
+- `fleet doctor` first — it checks everything. `fleet logs` shows the runner's recent log.
 - **Port busy**: `fleet start` kills a stale runner and takes over by itself. If a non-fleet process holds the port, set `"port"` in `~/.fleet/config.json`.
 - **Bot doesn't react**: make sure the bot is an **admin** of the group and Topics are enabled; then `/link` again.
+- **No terminal window pops**: run `fleet start` in a real console (not a background service); `/show` retries and tells you honestly if the window failed.
 - **Windows**: if git-bash is installed agents use it, otherwise plain `cmd.exe` — both work.
 
 ## Repo layout
