@@ -22,7 +22,7 @@ function saveJson(p, o) { try { mkdirSync(fleetDir(), { recursive: true }); writ
 //   deps.notifyOffline -> (agent, mid) => void
 //   deps.debounceSeconds, deps.log
 export function createDelivery(deps) {
-  const { server, registry, ensureAlive = () => {}, notifyOffline = () => {}, debounceSeconds = 15, log = () => {} } = deps;
+  const { server, registry, ensureAlive = () => {}, notifyOffline = () => {}, onDelivered = () => {}, debounceSeconds = 15, log = () => {} } = deps;
 
   const pending = new Map(Object.entries(loadJson(pendingPath()))); // name -> { texts, files, mid }
   const timers = new Map();
@@ -76,6 +76,7 @@ export function createDelivery(deps) {
     if (ok) {
       pending.delete(name); persist(); readyGate.delete(name); // proven ready
       if (mid) { setHw(name, mid); registry.ackDelivered?.(name, mid); }
+      try { onDelivered(name); } catch {} // e.g. show "typing…" while the agent works
       return true;
     }
     return false; // keep it queued; replay / sweep will retry

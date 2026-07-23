@@ -22,7 +22,7 @@ import { transcribeUrl } from "./transcribe.js";
 import { linkOwner, isLinked, loadConfig, fleetDir } from "./config.js";
 import { randomBytes } from "node:crypto";
 import { spawn as spawnProc, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, appendFileSync, statSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -71,7 +71,18 @@ function forwardPrefix(msg) {
 
 export async function startRunner(config) {
   let cfg = config || loadConfig();
-  const log = (...a) => console.error("[fleet]", ...a);
+  // log to console AND ~/.fleet/logs/runner.log (rotated at ~2MB) so `fleet logs` works post-mortem.
+  const logDir = join(fleetDir(), "logs");
+  const logFile = join(logDir, "runner.log");
+  try { mkdirSync(logDir, { recursive: true }); } catch {}
+  const log = (...a) => {
+    const line = a.join(" ");
+    console.error("[fleet]", line);
+    try {
+      appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`);
+      if (statSync(logFile).size > 2_000_000) { rmSync(`${logFile}.old`, { force: true }); renameSync(logFile, `${logFile}.old`); }
+    } catch {}
+  };
 
   if (!cfg.botToken) throw new Error("no botToken in config — run `fleet init` first");
 
@@ -92,12 +103,26 @@ export async function startRunner(config) {
   // "alive" = a Claude pty in agents, OR a running codex window.
   const isAgentAlive = (name) => agents.isAlive(name) || codexHandles.has(name);
 
+  // Topic title carries the agent's state at a glance: 🟢 running / 🟡 parked / 🔴 stopped|crashed.
+  // Only edits when the title actually changes (bot-side edits are silent — no service spam).
+  async function setTopicIcon(name, icon) {
+    const a = registry.getAgent(name);
+    if (!a || !cfg.supergroupId || !a.topicId) return;
+    const title = `${icon} ${name}`;
+    if (a.topicTitle === title) return;
+    try {
+      const r = await telegram.editForumTopic(cfg.supergroupId, a.topicId, title);
+      if (r?.ok !== false) registry.updateAgent(name, { topicTitle: title });
+    } catch {}
+  }
+
   // window closed by the owner -> PARK: kill the pty to free resources; registry + sessionId kept so
   // the next message (or /show) wakes it with --continue. Set status BEFORE kill so the watchdog skips it.
   function parkAgent(name) {
     registry.updateAgent(name, { status: "parked" });
     agents.killAgent(name);
     const h = codexHandles.get(name); if (h) { try { h.kill(); } catch {} codexHandles.delete(name); }
+    setTopicIcon(name, "🟡");
     log(`parked ${name} — freed; wakes on next message or /show`);
   }
   function hide(name) { // /hide: close the window but keep the agent running headless
@@ -113,33 +138,85 @@ export async function startRunner(config) {
     log(`woke ${name}`);
     return true;
   }
-  function show(name) { // /show: (re)open the window; wake if parked
-    if (agents.isAlive(name)) { openAttachWindow(name); registry.updateAgent(name, { status: "running" }); }
-    else wakeAgent(name);
+  async function show(name) { // /show: (re)open the window; wake if parked. Returns "did it connect?".
+    if (agents.isAlive(name)) { openAttachWindow(name, { force: true }); registry.updateAgent(name, { status: "running" }); }
+    else wakeAgent(name); // spawnBound force-opens the window
+    const deadline = Date.now() + 7000;
+    while (Date.now() < deadline) {
+      if (attachWs.has(name)) return true;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return attachWs.has(name);
   }
 
   const telegram = makeTelegram(cfg.botToken, { log });
 
+  // ── outbound reliability: agent->owner traffic survives network hiccups ─────
+  // telegram.post never throws (returns {ok:false,error}); a network-looking failure queues the
+  // message to ~/.fleet/outbox.json and a background flusher retries in order. Permanent Telegram
+  // errors (bad thread etc.) are NOT retried — retrying those forever would just spin.
+  const outboxPath = join(fleetDir(), "outbox.json");
+  let outbox = []; try { outbox = JSON.parse(readFileSync(outboxPath, "utf-8")); } catch {}
+  const saveOutbox = () => { try { writeFileSync(outboxPath, JSON.stringify(outbox)); } catch {} };
+  const NETISH = /fetch failed|network|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|abort|timeout/i;
+  async function sendOne(m) {
+    if (m.kind === "file") {
+      const fn = m.isImg ? telegram.sendPhoto : telegram.sendDocument;
+      return fn(cfg.supergroupId, m.path, { caption: m.caption || null, threadId: m.threadId });
+    }
+    return telegram.sendMessage(cfg.supergroupId, m.text, m.threadId);
+  }
+  async function sendOut(m) {
+    const r = await sendOne(m);
+    if (r && r.ok === false && NETISH.test(String(r.error || r.description || ""))) {
+      outbox.push(m);
+      if (outbox.length > 300) outbox = outbox.slice(-300);
+      saveOutbox();
+      log(`outbox: queued (network) — ${outbox.length} pending`);
+    }
+    return r;
+  }
+  const outboxSweep = setInterval(async () => {
+    if (!outbox.length) return;
+    const batch = outbox; outbox = []; saveOutbox();
+    for (const m of batch) await sendOut(m);
+    if (!outbox.length) log("outbox: flushed");
+  }, 15000);
+  outboxSweep.unref?.();
+
+  // ── "typing…" while the agent works: starts when a message is really injected, stops on reply ──
+  const typing = new Map(); // name -> interval
+  function startTyping(name) {
+    const a = registry.getAgent(name);
+    if (!a || !cfg.supergroupId) return;
+    stopTyping(name);
+    const tick = () => telegram.sendChatAction(cfg.supergroupId, a.topicId).catch(() => {});
+    tick();
+    const iv = setInterval(tick, 6000); // Telegram expires the bubble after ~5s
+    typing.set(name, iv);
+    setTimeout(() => { if (typing.get(name) === iv) stopTyping(name); }, 120000); // safety stop
+  }
+  function stopTyping(name) { const iv = typing.get(name); if (iv) { clearInterval(iv); typing.delete(name); } }
+
   // ── outbound: agent reply -> its Telegram topic (reply-follows-origin) ──────
   async function onReply(name, text) {
     const a = registry.getAgent(name);
-    const chat = cfg.supergroupId;
-    if (!a || !chat || !text) return;
+    if (!a || !cfg.supergroupId || !text) return;
+    stopTyping(name);
     const topic = a.replyTopic ?? a.topicId;
     log(`agent_out ${name} -> topic ${topic}: ${String(text).slice(0, 70)}`);
-    await telegram.sendMessage(chat, text, topic);
+    await sendOut({ kind: "text", text, threadId: topic });
   }
 
   async function onFile(name, j) {
     const a = registry.getAgent(name);
-    const chat = cfg.supergroupId;
-    if (!a || !chat) return;
+    if (!a || !cfg.supergroupId) return;
     // the MCP posts JSON with a local path (it already downloaded/produced the file); send it.
     const path = j?.path;
     if (!path) return;
+    stopTyping(name);
     const isImg = /\.(png|jpe?g|webp|gif)$/i.test(path);
-    const fn = isImg ? telegram.sendPhoto : telegram.sendDocument;
-    await fn(chat, path, { caption: j.caption || null, threadId: a.topicId });
+    await sendOut({ kind: "file", path, isImg, caption: j.caption || null, threadId: a.topicId });
   }
 
   async function onSession(name, sessionId, status) {
@@ -162,7 +239,7 @@ export async function startRunner(config) {
   async function onNotify(name, text) {
     const a = registry.getAgent(name);
     if (!a || !cfg.supergroupId || !text) return;
-    await telegram.sendMessage(cfg.supergroupId, text, a.topicId); // always the agent's own topic
+    await sendOut({ kind: "text", text, threadId: a.topicId }); // always the agent's own topic
   }
 
   async function onAck(name, mid) {
@@ -230,17 +307,26 @@ export async function startRunner(config) {
     debounceSeconds: cfg.debounceSeconds ?? 15, // 0 = deliver immediately (?? keeps a real 0)
     log,
     notifyOffline: () => {}, // waking handles it; no need to nag the owner
+    onDelivered: (name) => startTyping(name), // "typing…" from real injection until the reply
   });
 
   // ── attach: open a real terminal window that mirrors the agent's pty (owner can work in it) ──
   // Default ON (config.attach !== false). The attach client connects back to the localhost server.
   const attachOpening = new Map(); // name -> ts of the last window launch (it takes ~1s to connect)
-  function openAttachWindow(name) {
+  function openAttachWindow(name, { force = false, notifyFail = false } = {}) {
     if (cfg.attach === false) return;
     // A burst of messages (debounce 0) must not launch one console per message while the first
-    // window is still connecting.
-    if (!attachWs.has(name) && Date.now() - (attachOpening.get(name) || 0) < 4000) return;
+    // window is still connecting — but an EXPLICIT owner action (/show, /spawn, restart) always
+    // opens (the guard once silently ate a /show and the reply lied "window opened").
+    if (!force && !attachWs.has(name) && Date.now() - (attachOpening.get(name) || 0) < 4000) return;
     attachOpening.set(name, Date.now());
+    // `cmd /c start` reports success even when no window can appear (headless session, etc.) —
+    // verify the attach client actually dialed back, and say so if it didn't.
+    setTimeout(() => {
+      if (attachWs.has(name)) return;
+      log(`attach window for ${name} did not connect within 6s`);
+      if (notifyFail) onNotify(name, `window didn't open — make sure "fleet start" runs in a real console. /show to retry.`).catch(() => {});
+    }, 6000);
     // A previous window for this agent (pre-restart) would sit frozen on a dead pty and its late
     // close would look like an owner-park. Close it NOW, flagged so its close-handler stays silent.
     const old = attachWs.get(name);
@@ -287,6 +373,8 @@ export async function startRunner(config) {
       log,
       onExit: (n, e) => onAgentExit(n, e),
     });
+    openAttachWindow(name, { force: true, notifyFail: true }); // explicit spawn/restart -> window, verified
+    setTopicIcon(name, "🟢");
     if (a.freshNext) registry.updateAgent(name, { freshNext: false }); // /new consumed by this spawn
     // Capture the ACTIVE session id (newest .jsonl in the project) once claude has booted, so the
     // next wake is an exact --resume (and the id gets pinned in the topic via onSession). Without
@@ -316,6 +404,7 @@ export async function startRunner(config) {
     if (isAgentAlive(name)) return; // a newer pty is already running (restart raced the old exit) — don't double-spawn
     const g = agents.shouldRestart(name);
     if (g.loop) {
+      setTopicIcon(name, "🔴");
       onNotify(name, `crash loop (${g.count}x in 5min) — auto-restart stopped. Fix it, then /restart ${name}.`);
       return;
     }
@@ -345,6 +434,8 @@ export async function startRunner(config) {
       killCodex(n);
       agents.killAgent(n);
       delivery.clear(n);
+      stopTyping(n);
+      setTopicIcon(n, "🔴");
       try { ws?.send("\r\n\x1b[31m[fleet] agent killed.\x1b[0m\r\n"); ws?.close(); } catch {}
     },
     hide,
@@ -524,6 +615,32 @@ export async function startRunner(config) {
   const dropPid = () => { try { if (Number(readFileSync(pidPath, "utf-8").trim()) === process.pid) rmSync(pidPath); } catch {} };
   process.on("exit", dropPid);
   for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { dropPid(); process.exit(0); }); // Ctrl+C doesn't fire "exit"
+
+  // Crash report: a dying runner tells the owner WHERE it died instead of going silent — silence
+  // in the group otherwise looks like "fleet is fine, just quiet" for hours.
+  let crashReported = false;
+  async function crashReport(kind, e) {
+    const msg = `🔴 fleet runner ${kind}:\n${String(e?.stack || e).slice(0, 600)}`;
+    log(msg);
+    if (crashReported || !cfg.supergroupId) return;
+    crashReported = kind === "uncaughtException";
+    try { await telegram.sendMessage(cfg.supergroupId, msg); } catch {}
+  }
+  process.on("uncaughtException", (e) => { crashReport("uncaughtException", e).finally(() => { dropPid(); process.exit(1); }); });
+  process.on("unhandledRejection", (e) => { crashReport("unhandledRejection", e); }); // report, don't die
+
+  // Version notice into General (the CLI prints one too, but the phone is where the owner lives).
+  (async () => {
+    try {
+      const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+      const r = await fetch(`https://registry.npmjs.org/${pkg.name}/latest`, { signal: AbortSignal.timeout(6000) });
+      if (!r.ok) return;
+      const latest = (await r.json()).version;
+      if (latest && latest !== pkg.version && cfg.supergroupId) {
+        telegram.sendMessage(cfg.supergroupId, `⬆️ fleet ${latest} is out (you run ${pkg.version}). Update: fleet update`);
+      }
+    } catch {}
+  })();
   log(`localhost server on ${backendHttp}`);
 
   // make sure no webhook is set (long-poll won't receive updates while a webhook is active) + register menu

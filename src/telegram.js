@@ -125,6 +125,11 @@ export async function setMyCommands(token, commands) {
   return post(token, "setMyCommands", { commands });
 }
 
+// "typing…" bubble in a topic (auto-expires after ~5s on Telegram's side).
+export async function sendChatAction(token, chatId, threadId = null) {
+  return post(token, "sendChatAction", { chat_id: chatId, action: "typing", message_thread_id: threadId ?? undefined });
+}
+
 // Send a message with an inline keyboard (rows of [{text, data}] buttons -> callback_query).
 export async function sendKeyboard(token, chatId, text, threadId, rows) {
   const inline_keyboard = rows.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data })));
@@ -231,6 +236,7 @@ export function makeTelegram(token, { log } = {}) {
     unpinMessage: (chatId, messageId) => unpinMessage(token, chatId, messageId),
     getFileUrl: (fileId) => getFileUrl(token, fileId),
     setMyCommands: (commands) => setMyCommands(token, commands),
+    sendChatAction: (chatId, threadId) => sendChatAction(token, chatId, threadId),
     sendKeyboard: (chatId, text, threadId, rows) => sendKeyboard(token, chatId, text, threadId, rows),
     answerCallback: (callbackId, text) => answerCallback(token, callbackId, text),
     deleteWebhook: () => deleteWebhook(token),

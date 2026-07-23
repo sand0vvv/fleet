@@ -45,13 +45,13 @@ async function ack(mid) {
 }
 
 const INSTRUCTIONS =
-  "Ты — агент флота. Сообщения приходят как channel-уведомления (📨), часто с меткой источника " +
-  "вида `[📍 откуда · от кого]` — смотри её, чтобы понять, ОТКУДА сообщение и куда отвечать. " +
-  "У тебя ДВА вида поверхностей: (1) твой ЛИЧНЫЙ топик с владельцем — отвечай туда через `send_message`; " +
-  "(2) КОМНАТЫ — общие топики с другими агентами (напр. war-room с poly) — пиши туда через " +
-  "`say_in_room(room, text)` для координации с напарником. Узнать свои комнаты — `my_rooms`. " +
-  "Правило: владельцу в личке → send_message; напарнику в комнате → say_in_room. " +
-  "Обычный текст в консоли владелец НЕ видит; видит только отправленное через эти тулзы.";
+  "You are a fleet agent. Messages arrive as channel notifications (📨), often with a source label " +
+  "like `[📍 where · from whom]` — read it to know WHERE a message came from and where to answer. " +
+  "You have TWO surfaces: (1) your PERSONAL topic with the owner — answer there via `send_message`; " +
+  "(2) ROOMS — topics shared with other agents — write there via `say_in_room(room, text)` to " +
+  "coordinate with a teammate. List your rooms with `my_rooms`. " +
+  "Rule: owner in your topic → send_message; teammate in a room → say_in_room. " +
+  "Plain console text is INVISIBLE to the owner; only these tools reach them.";
 
 const server = new Server(
   { name: "fleet", version: "0.1.0" },
@@ -69,21 +69,21 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const tools = [
-    { name: "send_message", description: "Отправить текст владельцу в Telegram (топик агента).",
+    { name: "send_message", description: "Send text to the owner in Telegram (this agent's topic).",
       inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
-    { name: "send_file", description: "Отправить файл владельцу в Telegram. path — локальный путь.",
+    { name: "send_file", description: "Send a file to the owner in Telegram. path = local file path.",
       inputSchema: { type: "object", properties: { path: { type: "string" }, caption: { type: "string" } }, required: ["path"] } },
     { name: "say_in_room",
-      description: "Написать в КОМНАТУ — общий топик с другим агентом (напр. war-room). Так ты координируешься с напарником (напр. poly), и это видно владельцу. Для ответа ВЛАДЕЛЬЦУ в своём личном топике — обычный send_message. room = название комнаты (узнать через my_rooms).",
+      description: "Write into a ROOM — a topic shared with another agent. This is how you coordinate with a teammate, visibly to the owner. To answer the OWNER in your personal topic use plain send_message. room = room name (see my_rooms).",
       inputSchema: { type: "object", properties: { room: { type: "string" }, text: { type: "string" } }, required: ["room", "text"] } },
     { name: "my_rooms",
-      description: "Узнать, в каких КОМНАТАХ (общих топиках) ты состоишь и с кем — чтобы понимать, где можешь координироваться помимо личного топика.",
+      description: "List which ROOMS (shared topics) you are in and with whom — your coordination surfaces besides the personal topic.",
       inputSchema: { type: "object", properties: {} } },
   ];
   if (CONTROL) {
     tools.push({
       name: "fleet_command",
-      description: "Управление флотом — выполнить слэш-команду: /spawn <machine> <path> [headless|cli] [model], "
+      description: "Fleet control — run a slash command: /spawn <machine> <path> [headless|cli] [model], "
         + "/list, /machines, /kill <name>, /restart <name>, /mode <name> <m>, /model, /rename, /sessions, /use, /new, /stop, /compact.",
       inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
     });
@@ -120,7 +120,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       });
       const j = await r.json().catch(() => ({}));
       flog("say_in_room", args.room, j.ok);
-      return { content: [{ type: "text", text: j.ok ? `отправлено в комнату ${args.room}` : `ошибка: ${j.error || "не вышло"}` }] };
+      return { content: [{ type: "text", text: j.ok ? `sent to room ${args.room}` : `error: ${j.error || "failed"}` }] };
     }
     if (name === "my_rooms") {
       const r = await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/rooms`, { headers: { "x-fleet-token": TOKEN } });
@@ -144,7 +144,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function injectChannel(text) {
-  const content = `📨 Сообщение от владельца:\n\n${text}\n\n⚠️ Ответь владельцу ТОЛЬКО через инструмент send_message — твой текст в консоли он НЕ видит.`;
+  const content = `📨 Message from the owner:\n\n${text}\n\n⚠️ Reply to the owner ONLY via the send_message tool — your console text is INVISIBLE to them.`;
   try {
     await server.notification({ method: "notifications/claude/channel", params: { content, meta: { source: "fleet" } } });
     flog("injected channel notification");
@@ -168,7 +168,7 @@ function connectStream() {
   flog("connecting stream:", STREAM_WS);
   const ws = new WebSocket(STREAM_WS);
   // Heartbeat: without it a half-open socket (Railway idle-timeout / network blip) never fires "close",
-  // so the client thinks it's connected while the backend has already dropped it -> "cli не на связи"
+  // so the client thinks it's connected while the backend has already dropped it -> "agent offline"
   // until a manual /restart. Ping every 20s; if the prior ping got no pong, the link is dead -> kill it
   // (which fires "close" -> the 3s reconnect below). This is what stops the bogus offline state.
   let alive = true, pingTimer = null;
@@ -195,7 +195,7 @@ function connectStream() {
           try { paths.push(await downloadToInbox(u)); }
           catch (e) { flog("download fail:", e.message); paths.push(u); }
         }
-        text += `\n[файлы получены: ${paths.join(", ")}]`;
+        text += `\n[files received: ${paths.join(", ")}]`;
       }
       if (text.trim()) injectChannel(text);
       if (mid) { setHw(mid); await ack(mid); }

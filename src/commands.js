@@ -63,7 +63,7 @@ export function createCommands(deps) {
     const cmd = parts[0].replace(/^\//, "").split("@")[0].toLowerCase();
     const args = parts.slice(1);
     switch (cmd) {
-      case "help": return reply(null, helpText());
+      case "help": return reply(agent ? agent.topicId : null, helpText(agent));
       case "link": return cmdLink(args);
       case "spawn": return cmdSpawn(args);
       case "list": return cmdList(agent);
@@ -163,7 +163,11 @@ export function createCommands(deps) {
     if (!a) return reply(null, `usage: /${op} <agent> (or use it inside the agent's topic)`);
     try {
       if (op === "hide") { await hide(a.name); return reply(a.topicId, `${a.name}: window hidden, still running in the background. /show to reopen.`); }
-      await show(a.name); return reply(a.topicId, `${a.name}: window opened${agents.isAlive(a.name) ? "" : " (woke it up)"}.`);
+      // show() resolves only after the window actually CONNECTED (or timed out) — no more lying.
+      const ok = await show(a.name);
+      return reply(a.topicId, ok
+        ? `${a.name}: window opened.`
+        : `${a.name}: window did NOT open — make sure "fleet start" runs in a real console window, then /show again.`);
     } catch (e) { return reply(a.topicId, `/${op} error: ${String(e?.message || e)}`); }
   }
 
@@ -363,15 +367,29 @@ export function createCommands(deps) {
     await reply(a.topicId, `topic renamed: ${title}`);
   }
 
-  function helpText() {
+  // Contextual help: inside an agent topic show what works THERE; in General the fleet commands.
+  function helpText(agent) {
+    if (agent) {
+      return (
+        `You're in ${agent.name}'s topic. Just type (or voice) — the agent answers here.\n\n` +
+        "/context — context size (real Claude output)\n" +
+        "/compact · /clear — native commands into its terminal\n" +
+        "/usage — Claude limits panel\n" +
+        "/model — model picker · /restart to apply\n" +
+        "/hide · /show — window off/on (agent keeps running)\n" +
+        "/sessions · /use <id> — pick a session · /new — fresh one\n" +
+        "/rename <title> · /stop · /restart · /kill\n" +
+        "Any other /command goes straight into the agent's terminal (/cost, /review, …)."
+      );
+    }
     return (
-      "Commands:\n" +
-      "/spawn <path> [model]\n" +
-      "/list · /status <a> · /context <a>\n" +
-      "/kill <a> · /restart <a> · /stop <a> · /new <a>\n" +
-      "/mode <a> <m> · /model <a> <m> · /rename <a> <title>\n" +
-      "/sessions <a> · /use <a> <id> · /clear <a> · /compact <a>\n" +
-      "/link <owner_id> <supergroup_id> · /help"
+      "Fleet commands (General):\n" +
+      "/spawn <path> [codex] [model] — new agent (topic + window)\n" +
+      "/list — all agents · /status <a> — one agent\n" +
+      "/usage — Claude limits + fleet roster\n" +
+      "/kill <a> · /restart <a> · /stop <a>\n" +
+      "/link — bind this group (first run)\n" +
+      "/help — this text (in an agent topic it shows topic commands)"
     );
   }
 
