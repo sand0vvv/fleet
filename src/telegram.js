@@ -155,6 +155,7 @@ export function pollUpdates(token, onUpdate, { log = () => {} } = {}) {
 
   (async () => {
     log("telegram: long-poll started");
+    let netFails = 0; // consecutive network failures — drives backoff + keeps the log quiet
     while (running) {
       const ctrl = new AbortController();
       abort = ctrl;
@@ -173,6 +174,7 @@ export function pollUpdates(token, onUpdate, { log = () => {} } = {}) {
           signal: ctrl.signal,
         });
         const data = await r.json();
+        if (netFails) { log(`telegram: reconnected (after ${netFails} failed poll${netFails > 1 ? "s" : ""})`); netFails = 0; }
         if (data?.ok && Array.isArray(data.result)) {
           for (const upd of data.result) {
             offset = Math.max(offset, (upd.update_id || 0) + 1); // advance past this update
@@ -190,10 +192,15 @@ export function pollUpdates(token, onUpdate, { log = () => {} } = {}) {
       } catch (e) {
         if (running) {
           // AbortError on our own client-timeout is normal when Telegram returns nothing; only
-          // pause on real network errors.
+          // pause on real network errors. Backoff grows to 30s; log the 1st failure then every
+          // 10th so a flaky wifi doesn't flood the console (messages are never lost — long-poll
+          // just retries and Telegram redelivers from the same offset).
           if (e?.name !== "AbortError") {
-            log("telegram: poll error:", String(e?.message || e));
-            await sleep(2000);
+            netFails++;
+            if (netFails === 1 || netFails % 10 === 0) {
+              log(`telegram: network hiccup (${String(e?.message || e)}) — retrying (x${netFails})`);
+            }
+            await sleep(Math.min(30000, 2000 * netFails));
           }
         }
       } finally {

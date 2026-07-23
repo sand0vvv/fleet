@@ -200,6 +200,7 @@ export async function startRunner(config) {
         if (!unsub) { try { ws.send(`\r\n[fleet] agent "${name}" is not running.\r\n`); ws.close(); } catch {} return; }
         attachWs.set(name, ws);
         ws.on("message", (data, isBinary) => {
+          if (attachWs.get(name) !== ws) return; // a superseded window must not type into the new pty
           if (!isBinary) { // control frame (resize) as text JSON
             try { const j = JSON.parse(data.toString()); if (Array.isArray(j.resize)) { agents.resizeAgent(name, j.resize[0], j.resize[1]); return; } } catch {}
           }
@@ -207,7 +208,11 @@ export async function startRunner(config) {
         });
         ws.on("close", () => {
           try { unsub(); } catch {}
-          if (attachWs.get(name) === ws) attachWs.delete(name);
+          // ONLY the CURRENT window's close means anything. A stale window from before a /restart
+          // or /show closing late must not park the freshly-spawned agent (live-caught cascade:
+          // restart -> new window -> owner closes the old frozen one -> park killed the new pty).
+          if (attachWs.get(name) !== ws) return;
+          attachWs.delete(name);
           // /hide closed the window on purpose -> keep the agent running; otherwise the owner closed
           // the window -> PARK (kill the pty to free resources; it wakes on the next message / /show).
           if (hideKeep.has(name)) { hideKeep.delete(name); return; }
@@ -231,6 +236,13 @@ export async function startRunner(config) {
   // Default ON (config.attach !== false). The attach client connects back to the localhost server.
   function openAttachWindow(name) {
     if (cfg.attach === false) return;
+    // A previous window for this agent (pre-restart) would sit frozen on a dead pty and its late
+    // close would look like an owner-park. Close it NOW, flagged so its close-handler stays silent.
+    const old = attachWs.get(name);
+    if (old) {
+      attachWs.delete(name); // demote FIRST — a non-current window's close is silent, no flag needed
+      try { old.send("\r\n\x1b[33m[fleet] reopening window…\x1b[0m\r\n"); old.close(); } catch {}
+    }
     const client = join(__dirname, "attach.js").replace(/\\/g, "/");
     const env = { ...process.env, FLEET_ATTACH_PORT: String(port), FLEET_ATTACH_TOKEN: token, FLEET_ATTACH_AGENT: name };
     try {
@@ -324,12 +336,11 @@ export async function startRunner(config) {
     stopAgent: (n) => {
       registry.updateAgent(n, { status: "stopped" });
       const ws = attachWs.get(n);
-      if (ws) hideKeep.add(n); // this attach-ws close must NOT be treated as a window-close park
+      attachWs.delete(n); // demote FIRST — its close is then silent (no park, no flag juggling)
       killCodex(n);
       agents.killAgent(n);
       delivery.clear(n);
       try { ws?.send("\r\n\x1b[31m[fleet] agent killed.\x1b[0m\r\n"); ws?.close(); } catch {}
-      attachWs.delete(n);
     },
     hide,
     show,
