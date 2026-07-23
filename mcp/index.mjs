@@ -103,14 +103,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return { content: [{ type: "text", text: "sent" }] };
     }
     if (name === "send_file") {
-      const buf = readFileSync(args.path);
-      const fd = new FormData();
-      fd.append("file", new Blob([buf]), basename(args.path));
-      fd.append("caption", args.caption || "");
-      await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/file`,
-        { method: "POST", headers: { "x-fleet-token": TOKEN }, body: fd });
-      flog("send_file ok", args.path);
-      return { content: [{ type: "text", text: "sent" }] };
+      // The runner is LOCAL (same machine) — no need to upload bytes, just hand it the path.
+      // (The old multipart body got JSON-parsed to {} by the runner and the file silently died.)
+      readFileSync(args.path); // fail fast with a clear error if the path is wrong
+      const r = await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/file`, {
+        method: "POST", headers: { "content-type": "application/json", "x-fleet-token": TOKEN },
+        body: JSON.stringify({ path: args.path, caption: args.caption || "" }),
+      });
+      flog("send_file", r.ok ? "ok" : `HTTP ${r.status}`, args.path);
+      return { content: [{ type: "text", text: r.ok ? "sent" : `send failed (HTTP ${r.status})` }] };
     }
     if (name === "say_in_room") {
       const r = await fetch(`${BACKEND}/room/say`, {

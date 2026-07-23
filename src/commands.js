@@ -9,6 +9,9 @@
 // Commands supported: /spawn /list /kill /restart /new /stop /context /sessions /use /mode /model
 //                     /status /rename /link /clear /compact /help
 import { linkOwner, isLinked } from "./config.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 // last path segment (splits on / and \) — ports util.agent_name_from_path
 function agentNameFromPath(path) {
@@ -78,7 +81,7 @@ export function createCommands(deps) {
       case "use": return cmdUse(args, agent);
       case "mode": return cmdSet(args, "mode");
       case "model": return cmdModel(args, agent);
-      case "usage": return agent ? cmdNativeRelay("usage", args, agent) : cmdUsage();
+      case "usage": return cmdUsage(agent);
       case "rename": return cmdRename(args, agent);
       default: return reply(null, `unknown command: /${cmd}`);
     }
@@ -242,18 +245,48 @@ export function createCommands(deps) {
     return reply(a.topicId, `${a.name}: model → ${args[1]} · /restart to apply`);
   }
 
-  // /usage in General -> whole-fleet overview (in a topic it relays the NATIVE /usage instead).
-  // Context size is the raw jsonl estimate with no window-% guess — window size depends on the model.
+  // Real Claude limits (5h session / weekly) straight from the machine's OAuth creds — the same
+  // numbers the native /usage screen shows, as one compact message. Ports runner.py:_usage_panel.
+  async function usagePanel() {
+    try {
+      const creds = JSON.parse(readFileSync(join(homedir(), ".claude", ".credentials.json"), "utf-8"));
+      const tok = creds?.claudeAiOauth?.accessToken;
+      if (!tok) return "usage: no Claude credentials on this machine";
+      const r = await fetch("https://api.anthropic.com/api/oauth/usage", {
+        headers: { Authorization: `Bearer ${tok}` }, signal: AbortSignal.timeout(20000),
+      });
+      const d = await r.json();
+      const fmt = (b, label) => {
+        if (!b || b.utilization == null) return null;
+        let t = "";
+        if (b.resets_at) {
+          try { t = " · reset " + new Date(b.resets_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch {}
+        }
+        return `${label}: ${Math.round(b.utilization)}%${t}`;
+      };
+      const lines = [
+        fmt(d.five_hour, "Session (5h)"),
+        fmt(d.seven_day, "Week (all models)"),
+        fmt(d.seven_day_opus, "Week (Opus)"),
+        fmt(d.seven_day_sonnet, "Week (Sonnet)"),
+      ].filter(Boolean);
+      return lines.length ? "📊 Claude usage\n" + lines.join("\n") : "📊 usage: no data";
+    } catch (e) { return `usage error: ${String(e?.message || e)}`; }
+  }
+
+  // /usage -> the limits panel (account-wide, so same everywhere); General adds the fleet roster.
   function usageLine(r) {
     const tok = agents.sessionTokens(r.projectPath, r.sessionId || null);
     const alive = agents.isAlive(r.name);
     const ctx = tok != null ? `context ~${Math.floor(tok / 1000)}k tokens` : "context unknown (talk to it first)";
     return `${r.name} · ${r.engine || "claude"} · ${r.model || "default model"} · ${alive ? "running" : r.status} · ${ctx}`;
   }
-  async function cmdUsage() {
+  async function cmdUsage(agent) {
+    const panel = await usagePanel();
+    if (agent) return reply(agent.topicId, panel);
     const rows = registry.listAgents();
-    if (!rows.length) return reply(null, "no agents");
-    await reply(null, "Fleet usage:\n" + rows.map((r) => "- " + usageLine(r)).join("\n"));
+    const roster = rows.length ? "\n\nAgents:\n" + rows.map((r) => "- " + usageLine(r)).join("\n") : "";
+    await reply(null, panel + roster);
   }
 
   async function cmdAgentOp(op, args, agent) {

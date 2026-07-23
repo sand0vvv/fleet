@@ -234,8 +234,13 @@ export async function startRunner(config) {
 
   // ── attach: open a real terminal window that mirrors the agent's pty (owner can work in it) ──
   // Default ON (config.attach !== false). The attach client connects back to the localhost server.
+  const attachOpening = new Map(); // name -> ts of the last window launch (it takes ~1s to connect)
   function openAttachWindow(name) {
     if (cfg.attach === false) return;
+    // A burst of messages (debounce 0) must not launch one console per message while the first
+    // window is still connecting.
+    if (!attachWs.has(name) && Date.now() - (attachOpening.get(name) || 0) < 4000) return;
+    attachOpening.set(name, Date.now());
     // A previous window for this agent (pre-restart) would sit frozen on a dead pty and its late
     // close would look like an owner-park. Close it NOW, flagged so its close-handler stays silent.
     const old = attachWs.get(name);
@@ -455,8 +460,13 @@ export async function startRunner(config) {
       return;
     }
 
-    // plain message: wake a parked agent (--continue), then deliver.
+    // plain message: wake a parked agent (--continue), then deliver. A LIVE claude agent whose
+    // window is gone (e.g. it was woken headless, or the runner restarted under it) gets its
+    // window reopened too — unless the owner hid it on purpose (/hide).
     if (!isAgentAlive(agent.name)) wakeAgent(agent.name);
+    else if ((agent.engine || "claude") !== "codex" && !attachWs.has(agent.name) && agent.status !== "hidden") {
+      openAttachWindow(agent.name);
+    }
     registry.setReplyTarget(agent.name, agent.topicId, null);
     log(`enqueue -> agent=${agent.name} mid=${mid} (debounce ${cfg.debounceSeconds ?? 15}s)`);
     delivery.enqueue(agent.name, text, files, mid);
