@@ -49,6 +49,11 @@ const RULE_TEXT =
   "list your rooms with my_rooms.";
 
 const procs = new Map();          // name -> { pty, meta, buf:[], len, listeners:Set }
+// Names whose claude has actually reached its prompt (detected by ANSI-sniffing the pty). This is
+// the ONLY honest "can receive an injection now" signal: a channel notification pushed while claude
+// is still booting/resuming is silently swallowed and the message is gone. Delivery gates on it.
+const ready = new Set();
+export function isReady(name) { return ready.has(name); }
 const restartTimes = new Map();   // name -> [recent auto-restart epochs] (crash-loop guard)
 const ATTACH_BUF = 200_000;       // ~scrollback bytes replayed to a freshly attached terminal
 
@@ -140,6 +145,7 @@ export function spawnAgent(agent, opts = {}) {
     ({ file, args } = buildLaunch(`claude ${flags}${model}${resume}`));
   }
   log(`spawn ${name} (${engine}): ${file} ${args.join(" ")}`);
+  ready.delete(name); // a fresh process is NOT ready until its prompt shows up
 
   const pty = ptySpawn(file, args, { name: "xterm-256color", cols: 100, rows: 30, cwd: project, env });
 
@@ -160,7 +166,7 @@ export function spawnAgent(agent, opts = {}) {
         setTimeout(() => { try { pty.write("\r"); } catch {} }, 400);
       }
       if (/bypasspermissionson|welcometoclaudecode|\/help/.test(flat)) {
-        chanOk = true; log(`${name}: claude prompt ready`);
+        chanOk = true; ready.add(name); log(`${name}: claude prompt ready`);
       }
     }
     // scrollback buffer + live broadcast to any attached terminals
@@ -175,6 +181,7 @@ export function spawnAgent(agent, opts = {}) {
   const meta = { project, model: agent.model, engine: agent.engine || "claude", opts };
   pty.onExit((e) => {
     log(`${name}: pty EXIT ${JSON.stringify(e)}`);
+    ready.delete(name);
     if (procs.get(name)?.pty === pty) procs.delete(name);
     if (deliberate.delete(name)) return; // killed on purpose — not a crash, no watchdog
     try { onExit?.(name, e); } catch {}
@@ -243,6 +250,7 @@ export function killAgent(name) {
   const p = procs.get(name);
   if (!p) return false;
   deliberate.add(name);
+  ready.delete(name);
   procs.delete(name);
   try { p.pty.kill(); } catch {}
   return true;

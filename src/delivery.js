@@ -22,17 +22,25 @@ function saveJson(p, o) { try { mkdirSync(fleetDir(), { recursive: true }); writ
 //   deps.notifyOffline -> (agent, mid) => void
 //   deps.debounceSeconds, deps.log
 export function createDelivery(deps) {
-  const { server, registry, ensureAlive = () => {}, notifyOffline = () => {}, onDelivered = () => {}, debounceSeconds = 15, log = () => {} } = deps;
+  const {
+    server, registry, ensureAlive = () => {}, notifyOffline = () => {}, onDelivered = () => {},
+    // isReady(name) -> has the agent's CLI actually reached its prompt? (agents.js sniffs the pty).
+    // Pushing a channel notification before that is silently swallowed = message lost forever.
+    isReady = () => true,
+    debounceSeconds = 15, log = () => {},
+  } = deps;
 
   const pending = new Map(Object.entries(loadJson(pendingPath()))); // name -> { texts, files, mid }
   const timers = new Map();
-  const readyGate = new Map(); // name -> earliest ms we may inject (a freshly-spawned agent needs a
-  //   few seconds after its stream connects before it can process a channel notification; injecting
-  //   too early silently drops the message). Set by markReady() on stream connect.
+  // name -> { min, hard }: earliest ms we may inject, and the deadline after which we inject even
+  // without a readiness signal (so an unrecognised prompt can't wedge delivery forever).
+  const readyGate = new Map();
+  const HARD_WAIT_MS = 180000;
   let cursors = loadJson(cursorsPath());
 
-  // A freshly (re)connected agent isn't ready to receive an injection for ~a few seconds.
-  function markReady(name, delayMs = 5000) { readyGate.set(name, Date.now() + delayMs); }
+  // Called when an agent's stream (re)connects: it is NOT ready yet — a resumed session can take
+  // tens of seconds to reach the prompt. deliver() waits for isReady() (or the hard deadline).
+  function markReady(name, delayMs = 3000) { readyGate.set(name, { min: Date.now() + delayMs, hard: Date.now() + HARD_WAIT_MS }); }
 
   const persist = () => saveJson(pendingPath(), Object.fromEntries(pending));
   const hw = (name) => Number(cursors[name] || 0);
@@ -67,9 +75,21 @@ export function createDelivery(deps) {
     if (!a || !buf) return true;
     const mid = buf.mid;
     if (mid && mid <= hw(name)) { pending.delete(name); persist(); log(`deliver ${name}: mid=${mid} <= hw -> skip`); return true; }
-    // not ready yet (just connected) -> keep queued; the sweep retries once the gate passes.
-    const gate = readyGate.get(name) || 0;
-    if (Date.now() < gate) { log(`deliver ${name}: warming up (${Math.ceil((gate - Date.now()) / 1000)}s)`); return false; }
+    // Not ready yet -> keep queued; the sweep retries. Readiness is the AGENT'S OWN signal (its CLI
+    // reached the prompt), not a timer: a 5s guess raced heavy `--resume` sessions and the message
+    // was swallowed mid-boot (owner-caught: "window opens, message never arrives").
+    const gate = readyGate.get(name);
+    if (gate) {
+      const now = Date.now();
+      if (now < gate.min) { log(`deliver ${name}: warming up (${Math.ceil((gate.min - now) / 1000)}s)`); return false; }
+      if (!isReady(name)) {
+        if (now < gate.hard) {
+          if (!gate.logged || now - gate.logged > 15000) { gate.logged = now; log(`deliver ${name}: waiting for the agent's prompt…`); }
+          return false;
+        }
+        log(`deliver ${name}: no prompt signal after ${Math.round(HARD_WAIT_MS / 1000)}s — delivering anyway`);
+      }
+    }
     const text = buf.texts.filter(Boolean).join("\n").trim();
     const ok = server.pushToAgent(name, { mid, text: text || "(attachment)", files: buf.files || [] });
     log(`deliver(cli) ${name} mid=${mid} ok=${ok}`);

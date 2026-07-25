@@ -258,8 +258,8 @@ export async function startRunner(config) {
       onNotify,
       onStreamConnect: (name) => {
         registry.updateAgent(name, { status: "running" });
-        delivery.markReady(name, 5000);                    // give a fresh agent time before injecting
-        setTimeout(() => delivery.replay(name).catch(() => {}), 5200);
+        delivery.markReady(name, 3000); // arms the gate; the actual release is the prompt-ready signal
+        setTimeout(() => delivery.replay(name).catch(() => {}), 3200); // the 3s sweep retries after that
       },
       onStreamDisconnect: (name) => { log(`stream disconnect ${name}`); codexHandles.delete(name); }, // codex window closed -> allow re-spawn
       onRoomSay: () => {}, // rooms are a cloud-only feature; local single-owner build has none
@@ -308,6 +308,9 @@ export async function startRunner(config) {
     log,
     notifyOffline: () => {}, // waking handles it; no need to nag the owner
     onDelivered: (name) => startTyping(name), // "typing…" from real injection until the reply
+    // Claude: gate on the pty's own "prompt ready" sniff. Codex: its shell queues internally until
+    // the thread starts, so the timed gate is enough there.
+    isReady: (name) => ((registry.getAgent(name)?.engine || "claude") === "codex" ? true : agents.isReady(name)),
   });
 
   // ── attach: open a real terminal window that mirrors the agent's pty (owner can work in it) ──
