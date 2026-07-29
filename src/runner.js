@@ -91,7 +91,21 @@ export async function startRunner(config) {
   const token = cfg.runnerToken;
   const port = cfg.port || 9987;
   const backendHttp = `http://localhost:${port}`;
-  const streamWsFor = (name) => `ws://localhost:${port}/agent/${encodeURIComponent(name)}/stream?token=${encodeURIComponent(token)}`;
+  // Every spawn gets a one-time id that its agent carries on the stream URL. Only the CURRENT id is
+  // allowed to hold an agent's stream — see isCurrentSpawn. This fences off orphans: an agent left
+  // behind by a killed runner (taskkill /T doesn't always reach the pty's children) used to keep
+  // reconnecting forever, and each reconnect evicted the live agent — an endless duel that looked
+  // like "delivery just broke" (owner-caught: a stream disconnect every 3s, messages stuck).
+  const spawnIds = new Map(); // name -> current spawn id
+  const streamWsFor = (name, spawnId) =>
+    `ws://localhost:${port}/agent/${encodeURIComponent(name)}/stream?token=${encodeURIComponent(token)}` +
+    (spawnId ? `&spawn=${spawnId}` : "");
+  // Stale (or unfenced, i.e. pre-2.0.7) connections lose to the current spawn.
+  const isCurrentSpawn = (name, spawnId) => {
+    const cur = spawnIds.get(name);
+    if (!cur) return true;               // nothing spawned by us yet — let it in
+    return spawnId === cur;
+  };
 
   registry.loadState();
 
@@ -256,6 +270,8 @@ export async function startRunner(config) {
       onAck,
       onSession,
       onNotify,
+      isCurrentSpawn,
+      onStaleStream: (name, spawnId) => log(`rejected stale stream for ${name} (spawn=${spawnId || "none"}) — orphan of an older runner`),
       onStreamConnect: (name) => {
         registry.updateAgent(name, { status: "running" });
         delivery.markReady(name, 3000); // arms the gate; the actual release is the prompt-ready signal
@@ -369,9 +385,11 @@ export async function startRunner(config) {
     if (!a) throw new Error(`no agent ${name}`);
     // Authoritative cursor sync (see agents.syncCursor): a stale hw silently eats every message.
     agents.syncCursor(a.projectPath, delivery.hw(name));
+    const spawnId = randomBytes(6).toString("hex"); // fences this spawn's stream against orphans
+    spawnIds.set(name, spawnId);
     if ((a.engine || "claude") === "codex") {
       // codex needs a real console TTY -> its own window (no node-pty / no attach model)
-      const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name), token, log });
+      const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name, spawnId), token, log });
       codexHandles.set(name, h);
       setTopicIcon(name, "🟢"); // codex gets the same at-a-glance status as claude
       if (a.freshNext) registry.updateAgent(name, { freshNext: false }); // /new consumed by this spawn
@@ -379,7 +397,7 @@ export async function startRunner(config) {
     }
     const pid = agents.spawnAgent(a, {
       backendHttp,
-      streamWs: streamWsFor(name),
+      streamWs: streamWsFor(name, spawnId),
       token,
       channelMode: "dev",
       log,

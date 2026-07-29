@@ -61,7 +61,16 @@ export function startServer({ port, token, handlers = {} }) {
     const sm = url.match(/^\/agent\/([^/?]+)\/stream/);
     if (sm) {
       const name = decodeURIComponent(sm[1]);
+      const spawnId = (url.match(/[?&]spawn=([^&]+)/) || [])[1] || null;
       return wss.handleUpgrade(req, socket, head, (ws) => {
+        // Only the agent from the CURRENT spawn may hold this stream. An orphan left over from a
+        // killed runner would otherwise reconnect every few seconds and evict the live agent,
+        // and the two would trade the stream forever with nothing being delivered.
+        if (handlers.isCurrentSpawn && !handlers.isCurrentSpawn(name, spawnId)) {
+          handlers.onStaleStream?.(name, spawnId);
+          try { ws.close(4001, "superseded"); } catch {}
+          return;
+        }
         const old = streams.get(name);
         if (old && old !== ws) { try { old.close(); } catch {} }
         streams.set(name, ws);

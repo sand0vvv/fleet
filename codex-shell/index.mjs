@@ -395,6 +395,12 @@ async function onAppServerReady() {
         clearInterval(pingTimer);
         pingTimer = null;
       }
+      // 4001 = the runner has a newer agent for this topic; we're an orphan of a dead runner.
+      // Reconnecting would evict the live agent every few seconds — stop instead.
+      if (code === 4001) {
+        log("runner stream CLOSE 4001 superseded — a newer agent owns this topic, stopping");
+        return;
+      }
       log(`runner stream CLOSE (code=${code} reason=${reason || "-"}) → reconnect 3s`);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connectStream, 3000);

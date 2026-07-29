@@ -178,6 +178,9 @@ function connectStream() {
   });
   ws.on("close", (c) => {
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    // 4001 = the runner has a newer agent for this name; we're an orphan of a dead runner.
+    // Reconnecting would evict the live agent every few seconds, so stop for good.
+    if (c === 4001) { flog("stream CLOSE 4001 superseded — a newer agent owns this topic, stopping"); return; }
     flog("stream CLOSE", c, "-> reconnect 3s");
     setTimeout(connectStream, 3000);
   });
