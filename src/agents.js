@@ -45,8 +45,7 @@ function buildLaunch(claudeCmd) {
 const RULE_TEXT =
   "You are a fleet agent. The owner talks to you from Telegram and sees ONLY messages sent via the " +
   "send_message tool (files via send_file). Your text in this terminal is INVISIBLE to the owner. " +
-  "ALWAYS reply to the owner via send_message. For coordination in a shared room use say_in_room; " +
-  "list your rooms with my_rooms.";
+  "ALWAYS reply to the owner via send_message.";
 
 const procs = new Map();          // name -> { pty, meta, buf:[], len, listeners:Set }
 // Names whose claude has actually reached its prompt (detected by ANSI-sniffing the pty). This is

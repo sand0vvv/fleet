@@ -1,0 +1,44 @@
+name: publish
+
+# Publishing runs HERE, not from a laptop: npm only attaches a provenance attestation (the
+# "Built and signed on GitHub Actions" badge) when the publish comes from a supported CI with an
+# OIDC identity. Push a tag like v2.0.6 and this ships that exact commit.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      # The tag must match package.json, otherwise a tag typo silently publishes the wrong version.
+      - name: Check tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG=${GITHUB_REF_NAME#v}
+          echo "package.json=$PKG tag=$TAG"
+          test "$PKG" = "$TAG"
+
+      - name: Sanity-check the package contents
+        run: |
+          npm pack --dry-run
+          node --check src/cli.js
+          node --check mcp/index.mjs
+          node --check codex-shell/index.mjs
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

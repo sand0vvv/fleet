@@ -45,12 +45,8 @@ async function ack(mid) {
 }
 
 const INSTRUCTIONS =
-  "You are a fleet agent. Messages arrive as channel notifications (📨), often with a source label " +
-  "like `[📍 where · from whom]` — read it to know WHERE a message came from and where to answer. " +
-  "You have TWO surfaces: (1) your PERSONAL topic with the owner — answer there via `send_message`; " +
-  "(2) ROOMS — topics shared with other agents — write there via `say_in_room(room, text)` to " +
-  "coordinate with a teammate. List your rooms with `my_rooms`. " +
-  "Rule: owner in your topic → send_message; teammate in a room → say_in_room. " +
+  "You are a fleet agent. Messages from the owner arrive as channel notifications (📨). " +
+  "Answer in your Telegram topic with `send_message`, and send files with `send_file`. " +
   "Plain console text is INVISIBLE to the owner; only these tools reach them.";
 
 const server = new Server(
@@ -73,12 +69,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
     { name: "send_file", description: "Send a file to the owner in Telegram. path = local file path.",
       inputSchema: { type: "object", properties: { path: { type: "string" }, caption: { type: "string" } }, required: ["path"] } },
-    { name: "say_in_room",
-      description: "Write into a ROOM — a topic shared with another agent. This is how you coordinate with a teammate, visibly to the owner. To answer the OWNER in your personal topic use plain send_message. room = room name (see my_rooms).",
-      inputSchema: { type: "object", properties: { room: { type: "string" }, text: { type: "string" } }, required: ["room", "text"] } },
-    { name: "my_rooms",
-      description: "List which ROOMS (shared topics) you are in and with whom — your coordination surfaces besides the personal topic.",
-      inputSchema: { type: "object", properties: {} } },
   ];
   if (CONTROL) {
     tools.push({
@@ -112,21 +102,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       });
       flog("send_file", r.ok ? "ok" : `HTTP ${r.status}`, args.path);
       return { content: [{ type: "text", text: r.ok ? "sent" : `send failed (HTTP ${r.status})` }] };
-    }
-    if (name === "say_in_room") {
-      const r = await fetch(`${BACKEND}/room/say`, {
-        method: "POST", headers: { "content-type": "application/json", "x-fleet-token": TOKEN },
-        body: JSON.stringify({ from: AGENT, room: args.room, text: args.text }),
-      });
-      const j = await r.json().catch(() => ({}));
-      flog("say_in_room", args.room, j.ok);
-      return { content: [{ type: "text", text: j.ok ? `sent to room ${args.room}` : `error: ${j.error || "failed"}` }] };
-    }
-    if (name === "my_rooms") {
-      const r = await fetch(`${BACKEND}/agent/${encodeURIComponent(AGENT)}/rooms`, { headers: { "x-fleet-token": TOKEN } });
-      const j = await r.json().catch(() => []);
-      flog("my_rooms", JSON.stringify(j).slice(0, 120));
-      return { content: [{ type: "text", text: JSON.stringify(j) }] };
     }
     if (name === "fleet_command" && CONTROL) {
       await fetch(`${BACKEND}/fleet/command`, {

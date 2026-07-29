@@ -32,6 +32,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
+import { threadIdOf, newestThreadId } from "./thread.mjs";
 
 // ---------------------------------------------------------------------------
 // CONFIG — fleet identity from the environment (wired by the runner).
@@ -204,11 +205,37 @@ async function onAppServerReady() {
     }
   }
 
+  async function adoptThread(id, why) {
+    activeThreadId = id;
+    log(`active thread = ${id} (via ${why}; queued: ${messageQueue.length})`);
+    while (messageQueue.length > 0) await deliverToCodex(messageQueue.shift());
+  }
+
+  // Safety net: if nothing ever announced a thread but the owner is writing to us, ask the server
+  // for its threads and take the newest. Without this a protocol rename silently eats messages.
+  let discovering = false;
+  async function discoverThread() {
+    if (discovering || activeThreadId) return;
+    discovering = true;
+    try {
+      const r = await rpc("thread/list", {});
+      const id = newestThreadId(r);
+      if (id) await adoptThread(id, "thread/list");
+      else log(`thread/list returned nothing usable: ${JSON.stringify(r).slice(0, 200)}`);
+    } catch (e) {
+      log("thread/list failed:", JSON.stringify(e).slice(0, 200));
+    } finally {
+      discovering = false;
+    }
+  }
+
   async function deliverToCodex(item) {
     // item: { mid, text }
     if (!activeThreadId) {
       messageQueue.push(item);
       log(`queued message mid=${item.mid} (no active thread yet)`);
+      // the TUI may be mid-resume: retry discovery shortly, then flush whatever piled up
+      setTimeout(() => { discoverThread().catch(() => {}); }, 4000);
       return;
     }
     if (item.mid && seenMessageIds.has(item.mid)) {
@@ -282,16 +309,13 @@ async function onAppServerReady() {
       else resolve(msg.result);
       return;
     }
-    if (msg.method === "thread/started" && msg.params?.thread?.id) {
-      const newId = msg.params.thread.id;
-      if (newId !== activeThreadId) {
-        activeThreadId = newId;
-        log(`active thread = ${newId} (queued: ${messageQueue.length})`);
-        while (messageQueue.length > 0) {
-          const item = messageQueue.shift();
-          await deliverToCodex(item);
-        }
-      }
+    // Adopt the thread from ANY notification that names one. `thread/started` only fires for a
+    // NEW thread — when the TUI is launched with `codex resume --last` the server announces a
+    // RESUMED thread instead (thread/loaded), so keying on thread/started alone left activeThreadId
+    // null and every owner message queued forever ("queued message … no active thread yet").
+    if (msg.method) {
+      const found = threadIdOf(msg);
+      if (found && found !== activeThreadId) await adoptThread(found, msg.method);
     }
   });
 

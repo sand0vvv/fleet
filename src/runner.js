@@ -261,9 +261,17 @@ export async function startRunner(config) {
         delivery.markReady(name, 3000); // arms the gate; the actual release is the prompt-ready signal
         setTimeout(() => delivery.replay(name).catch(() => {}), 3200); // the 3s sweep retries after that
       },
-      onStreamDisconnect: (name) => { log(`stream disconnect ${name}`); codexHandles.delete(name); }, // codex window closed -> allow re-spawn
-      onRoomSay: () => {}, // rooms are a cloud-only feature; local single-owner build has none
-      rooms: () => [],
+      // A codex agent has no attach window to watch, so its stream dropping IS the "window closed"
+      // signal: free the handle and park it (🟡) so the status matches reality and the next message
+      // wakes it. Claude keeps its own path (park happens when the attach window closes).
+      onStreamDisconnect: (name) => {
+        log(`stream disconnect ${name}`);
+        if (!codexHandles.delete(name)) return;
+        const a = registry.getAgent(name);
+        if (!a || a.status === "stopped") return; // deliberate /kill or /stop — leave it alone
+        registry.updateAgent(name, { status: "parked" });
+        setTopicIcon(name, "🟡");
+      },
       // `fleet claude` / `fleet codex` from a terminal: the CLI POSTs here to spawn an agent for a folder.
       onSpawn: async ({ path, engine }) => {
         if (!isLinked(cfg)) return { ok: false, error: "not linked — send /link in your supergroup first" };
@@ -365,6 +373,7 @@ export async function startRunner(config) {
       // codex needs a real console TTY -> its own window (no node-pty / no attach model)
       const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name), token, log });
       codexHandles.set(name, h);
+      setTopicIcon(name, "🟢"); // codex gets the same at-a-glance status as claude
       if (a.freshNext) registry.updateAgent(name, { freshNext: false }); // /new consumed by this spawn
       return h.pid;
     }

@@ -9,8 +9,6 @@
 //   POST /agent/:name/ack      { mid }           -> delivery ack          (handlers.onAck)
 //   POST /agent/:name/notify   { text }          -> internal status       (handlers.onNotify)
 //   POST /agent/:name/session  { session_id }    -> session tracking      (handlers.onSession)
-//   POST /room/say             { from,room,text} -> room message          (handlers.onRoomSay)
-//   GET  /agent/:name/rooms                      -> rooms for agent       (handlers.rooms)
 //   WS   /agent/:name/stream?token=              -> push {mid,text,files} down to the live cli agent
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -42,12 +40,7 @@ export function startServer({ port, token, handlers = {} }) {
           if (kind === "ack") { await handlers.onAck?.(name, Number(j.mid) || 0); return send(200, { ok: true }); }
           if (kind === "notify") { await handlers.onNotify?.(name, j.text || ""); return send(200, { ok: true }); }
           if (kind === "session") { await handlers.onSession?.(name, j.session_id || "", j.status); return send(200, { ok: true }); }
-          if (kind === "rooms") { return send(200, (await handlers.rooms?.(name)) || []); }
         } catch (e) { return send(500, { error: String(e?.message || e).slice(0, 200) }); }
-      }
-      if (url === "/room/say") {
-        let j = {}; try { j = body ? JSON.parse(body) : {}; } catch {}
-        await handlers.onRoomSay?.(j); return send(200, { ok: true });
       }
       if (req.method === "POST" && url === "/spawn") {
         let j = {}; try { j = body ? JSON.parse(body) : {}; } catch {}
