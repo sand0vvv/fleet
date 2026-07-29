@@ -17,7 +17,7 @@ import * as registry from "./registry.js";
 import * as agents from "./agents.js";
 import { createDelivery } from "./delivery.js";
 import { createCommands, commandOf } from "./commands.js";
-import { spawnCodexAgent } from "./engine-codex.js";
+import { spawnCodexAgent, killCodexAgent } from "./engine-codex.js";
 import { transcribeUrl } from "./transcribe.js";
 import { linkOwner, isLinked, loadConfig, fleetDir } from "./config.js";
 import { randomBytes } from "node:crypto";
@@ -135,7 +135,7 @@ export async function startRunner(config) {
   function parkAgent(name) {
     registry.updateAgent(name, { status: "parked" });
     agents.killAgent(name);
-    const h = codexHandles.get(name); if (h) { try { h.kill(); } catch {} codexHandles.delete(name); }
+    killCodex(name);
     setTopicIcon(name, "🟡");
     log(`parked ${name} — freed; wakes on next message or /show`);
   }
@@ -280,7 +280,12 @@ export async function startRunner(config) {
       // A codex agent has no attach window to watch, so its stream dropping IS the "window closed"
       // signal: free the handle and park it (🟡) so the status matches reality and the next message
       // wakes it. Claude keeps its own path (park happens when the attach window closes).
-      onStreamDisconnect: (name) => {
+      onStreamDisconnect: (name, spawnId) => {
+        // Ignore drops from an older spawn. Otherwise a leftover client disconnecting half a second
+        // after we started a fresh window marked the LIVE agent "parked" — and the next message
+        // opened yet another window, one per message (owner-caught).
+        const cur = spawnIds.get(name);
+        if (cur && spawnId !== cur) { log(`stream disconnect ${name} (stale spawn ${spawnId || "none"}) — ignored`); return; }
         log(`stream disconnect ${name}`);
         if (!codexHandles.delete(name)) return;
         const a = registry.getAgent(name);
@@ -388,7 +393,10 @@ export async function startRunner(config) {
     const spawnId = randomBytes(6).toString("hex"); // fences this spawn's stream against orphans
     spawnIds.set(name, spawnId);
     if ((a.engine || "claude") === "codex") {
-      // codex needs a real console TTY -> its own window (no node-pty / no attach model)
+      // codex needs a real console TTY -> its own window (no node-pty / no attach model).
+      // Close the previous window first (synchronously) so windows can't pile up on screen —
+      // one agent, one console. Safe ordering: the sweep finishes before the new one starts.
+      killCodex(name);
       const h = spawnCodexAgent(a, { backendHttp, streamWs: streamWsFor(name, spawnId), token, log });
       codexHandles.set(name, h);
       setTopicIcon(name, "🟢"); // codex gets the same at-a-glance status as claude
@@ -419,7 +427,15 @@ export async function startRunner(config) {
     }, 15000);
     return pid;
   }
-  function killCodex(name) { const h = codexHandles.get(name); if (h) { try { h.kill(); } catch {} codexHandles.delete(name); } }
+  // Close an agent's codex window even if we no longer hold its handle — a window can outlive the
+  // handle (that's exactly how they started piling up, one per message).
+  function killCodex(name) {
+    const h = codexHandles.get(name);
+    codexHandles.delete(name);
+    const a = registry.getAgent(name);
+    if (h) { try { h.kill(); } catch {} return; }
+    if (a && (a.engine || "claude") === "codex") { try { killCodexAgent(name, a.projectPath); } catch {} }
+  }
   function restartBound(name) {
     killCodex(name);
     agents.killAgent(name);

@@ -74,8 +74,10 @@ export function startServer({ port, token, handlers = {} }) {
         const old = streams.get(name);
         if (old && old !== ws) { try { old.close(); } catch {} }
         streams.set(name, ws);
-        handlers.onStreamConnect?.(name);
-        ws.on("close", () => { if (streams.get(name) === ws) streams.delete(name); handlers.onStreamDisconnect?.(name); });
+        handlers.onStreamConnect?.(name, spawnId);
+        // The spawn id travels with the CLOSE too: a socket opened by an older spawn can drop long
+        // after a newer agent took over, and acting on that drop would mark the live agent dead.
+        ws.on("close", () => { if (streams.get(name) === ws) streams.delete(name); handlers.onStreamDisconnect?.(name, spawnId); });
         ws.on("message", () => {}); // keepalive
       });
     }

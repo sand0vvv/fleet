@@ -164,37 +164,38 @@ export function spawnCodexAgent(agent, env = {}) {
 
   child.on("error", (e) => log(`codex ${name}: spawn error ${e.message}`));
 
-  return {
-    pid: child.pid,
-    child,
-    // Kill the WHOLE per-agent tree so the console window closes too. Windows: find every process
-    // whose command line ends with our `--agent <name>` marker (the `cmd /c node …` host + node itself)
-    // and taskkill /T /F each — children (codex app-server + codex --remote TUI) die with the tree,
-    // and when node exits the hosting cmd window closes. Fallback sweep: anything still referencing
-    // this agent's CODEX_HOME (belt and braces for detached codex processes).
-    // SYNCHRONOUS on purpose: /restart does kill()+spawn back-to-back — an async sweep would still
-    // be enumerating processes when the NEW codex tree (same marker, same CODEX_HOME) comes up and
-    // would kill the newborn (seen live: TUI exited 0xC000013A ~4s after respawn). Blocking ~1-2s
-    // on /kill //restart is fine; the sweep is fully done before we return.
-    kill: () => {
-      try {
-        if (process.platform === "win32") {
-          const homeFwd = codexHome(project).replace(/\\/g, "/");   // config.toml style
-          const homeBack = codexHome(project).replace(/\//g, "\\"); // native style
-          // NB: exclude $PID — this sweep's own command line contains the marker/path strings.
-          const ps = [
-            `$targets = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*--agent ${name}' };`,
-            `foreach ($p in $targets) { taskkill /PID $p.ProcessId /T /F 2>$null };`,
-            `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*${homeFwd}*' -or $_.CommandLine -like '*${homeBack}*') } | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null }`,
-          ].join(" ");
-          spawnSync("powershell", ["-NoProfile", "-Command", ps], { stdio: "ignore", timeout: 15000 });
-        } else {
-          try { child.kill(); } catch {}
-          // POSIX: kill by the argv marker (the terminal app survives; the codex processes die)
-          spawnSync("pkill", ["-f", `--agent ${name}$`], { stdio: "ignore", timeout: 15000 });
-        }
-        return true;
-      } catch { return false; }
-    },
-  };
+  return { pid: child.pid, child, kill: () => killCodexAgent(name, project, child) };
+}
+
+// Kill an agent's whole codex tree so its console window closes. Windows: match every process
+// whose command line carries our `--agent <name>` marker (the `cmd /c node …` host + node itself)
+// and taskkill /T /F each — the codex app-server and the `--remote` TUI die with the tree, and the
+// hosting cmd window closes when node exits. Second sweep: anything still referencing this agent's
+// CODEX_HOME, for detached strays.
+//
+// Takes name+project rather than a handle ON PURPOSE: a window can outlive the runner's handle
+// (that's how windows started piling up), and we must still be able to close it.
+//
+// SYNCHRONOUS on purpose: /restart and re-spawn call kill()+spawn back to back — an async sweep
+// would still be enumerating processes when the NEW tree (same marker, same CODEX_HOME) comes up
+// and would kill the newborn (seen live: TUI exited 0xC000013A seconds after respawn).
+export function killCodexAgent(name, project, child = null) {
+  try {
+    if (process.platform === "win32") {
+      const homeFwd = codexHome(project).replace(/\\/g, "/");   // config.toml style
+      const homeBack = codexHome(project).replace(/\//g, "\\"); // native style
+      // NB: exclude $PID — this sweep's own command line contains the marker/path strings.
+      const ps = [
+        `$targets = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*--agent ${name}' };`,
+        `foreach ($p in $targets) { taskkill /PID $p.ProcessId /T /F 2>$null };`,
+        `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*${homeFwd}*' -or $_.CommandLine -like '*${homeBack}*') } | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null }`,
+      ].join(" ");
+      spawnSync("powershell", ["-NoProfile", "-Command", ps], { stdio: "ignore", timeout: 15000 });
+    } else {
+      try { child?.kill(); } catch {}
+      // POSIX: kill by the argv marker (the terminal app survives; the codex processes die)
+      spawnSync("pkill", ["-f", `--agent ${name}$`], { stdio: "ignore", timeout: 15000 });
+    }
+    return true;
+  } catch { return false; }
 }
